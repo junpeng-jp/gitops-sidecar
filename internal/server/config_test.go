@@ -193,6 +193,7 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestValidateSSHRuntime(t *testing.T) {
+	t.Parallel()
 	validRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git"}
 	verifyRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git", VerifyCommit: true}
 
@@ -205,6 +206,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 		{
 			name: "valid runtime dir",
 			setup: func(t *testing.T) string {
+				t.Helper()
 				return writeRuntimeDir(t, []model.RepoConfig{validRepo})
 			},
 			repos: []model.RepoConfig{validRepo},
@@ -212,6 +214,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 		{
 			name: "runtimeDir does not exist",
 			setup: func(t *testing.T) string {
+				t.Helper()
 				return filepath.Join(t.TempDir(), "nonexistent")
 			},
 			repos:       []model.RepoConfig{validRepo},
@@ -220,6 +223,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 		{
 			name: "gitconfig missing",
 			setup: func(t *testing.T) string {
+				t.Helper()
 				dir := writeRuntimeDir(t, []model.RepoConfig{validRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "gitconfig")))
 				return dir
@@ -230,6 +234,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 		{
 			name: "ssh_config missing",
 			setup: func(t *testing.T) string {
+				t.Helper()
 				dir := writeRuntimeDir(t, []model.RepoConfig{validRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "ssh_config")))
 				return dir
@@ -240,6 +245,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 		{
 			name: "known_hosts missing",
 			setup: func(t *testing.T) string {
+				t.Helper()
 				dir := writeRuntimeDir(t, []model.RepoConfig{validRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "known_hosts")))
 				return dir
@@ -250,6 +256,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 		{
 			name: "verifyCommit repo missing allowed-signers file",
 			setup: func(t *testing.T) string {
+				t.Helper()
 				return writeRuntimeDir(t, []model.RepoConfig{validRepo}) // no VerifyCommit, so no allowed-signers written
 			},
 			repos:       []model.RepoConfig{verifyRepo},
@@ -259,6 +266,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			runtimeDir := tc.setup(t)
 			err := validateSSHRuntime(runtimeDir, tc.repos)
 
@@ -291,6 +299,7 @@ func TestLoadConfigWithRuntimeDir(t *testing.T) {
 			name:  "runtimeDir set but directory missing fails at load",
 			repos: []model.RepoConfig{validRepo},
 			runtimeDir: func(t *testing.T, _ []model.RepoConfig) string {
+				t.Helper()
 				return filepath.Join(t.TempDir(), "nonexistent")
 			},
 			expectedErr: errRuntimeDirMissing,

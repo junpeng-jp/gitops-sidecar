@@ -11,27 +11,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func mustRun(t *testing.T, name string, args ...string) {
+const (
+	gitCmd     = "git"
+	branchMain = "main"
+)
+
+func mustRun(t *testing.T, args ...string) {
 	t.Helper()
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(context.Background(), gitCmd, args...) //nolint:gosec
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "%s %v: %s", name, args, out)
+	require.NoError(t, err, "%s %v: %s", gitCmd, args, out)
 }
 
 func initGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "repo")
-	require.NoError(t, os.Mkdir(dir, 0755))
-	mustRun(t, "git", "init", "-b", "main", dir)
-	mustRun(t, "git", "-C", dir, "config", "user.email", "test@test.com")
-	mustRun(t, "git", "-C", dir, "config", "user.name", "Test")
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0644))
-	mustRun(t, "git", "-C", dir, "add", ".")
-	mustRun(t, "git", "-C", dir, "commit", "-m", "init")
+	require.NoError(t, os.Mkdir(dir, 0750))
+	mustRun(t, "init", "-b", branchMain, dir)
+	mustRun(t, "-C", dir, "config", "user.email", "test@test.com")
+	mustRun(t, "-C", dir, "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0600))
+	mustRun(t, "-C", dir, "add", ".")
+	mustRun(t, "-C", dir, "commit", "-m", "init")
 	return dir
 }
 
 func TestShellGitClient_BareClone(t *testing.T) {
+	t.Parallel()
 	gc := ShellGitClient{}
 
 	testCases := []struct {
@@ -40,22 +46,22 @@ func TestShellGitClient_BareClone(t *testing.T) {
 		expectedErr string
 	}{
 		{
-			name: "happy path: clones repo into bare dir",
-			setup: func(t *testing.T) string {
-				return initGitRepo(t)
-			},
+			name:  "happy path: clones repo into bare dir",
+			setup: initGitRepo,
 		},
 		{
 			name: "error path: invalid URL",
 			setup: func(t *testing.T) string {
+				t.Helper()
 				return "/definitely/not/a/repo"
 			},
-			expectedErr: "git",
+			expectedErr: gitCmd,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			url := tc.setup(t)
 			bareDir := filepath.Join(t.TempDir(), "bare")
 			err := gc.BareClone(context.Background(), url, bareDir)
@@ -70,6 +76,7 @@ func TestShellGitClient_BareClone(t *testing.T) {
 }
 
 func TestShellGitClient_Fetch(t *testing.T) {
+	t.Parallel()
 	gc := ShellGitClient{}
 
 	testCases := []struct {
@@ -80,25 +87,28 @@ func TestShellGitClient_Fetch(t *testing.T) {
 		{
 			name: "happy path: fetches from origin",
 			setup: func(t *testing.T, bareDir string) {
+				t.Helper()
 				require.NoError(t, gc.BareClone(context.Background(), initGitRepo(t), bareDir))
 			},
 		},
 		{
 			name:        "error path: nonexistent dir",
-			setup:       func(t *testing.T, _ string) {},
-			expectedErr: "git",
+			setup:       func(t *testing.T, bareDir string) { t.Helper() },
+			expectedErr: gitCmd,
 		},
 		{
 			name: "error path: context cancelled",
 			setup: func(t *testing.T, bareDir string) {
+				t.Helper()
 				require.NoError(t, gc.BareClone(context.Background(), initGitRepo(t), bareDir))
 			},
-			expectedErr: "git",
+			expectedErr: gitCmd,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			bareDir := filepath.Join(t.TempDir(), "bare")
 			tc.setup(t, bareDir)
 
@@ -121,6 +131,7 @@ func TestShellGitClient_Fetch(t *testing.T) {
 }
 
 func TestShellGitClient_WorktreePrune(t *testing.T) {
+	t.Parallel()
 	gc := ShellGitClient{}
 
 	testCases := []struct {
@@ -131,6 +142,7 @@ func TestShellGitClient_WorktreePrune(t *testing.T) {
 		{
 			name: "happy path: prunes stale worktree entries",
 			setup: func(t *testing.T, bareDir string) {
+				t.Helper()
 				require.NoError(t, gc.BareClone(context.Background(), initGitRepo(t), bareDir))
 			},
 		},
@@ -138,6 +150,7 @@ func TestShellGitClient_WorktreePrune(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			bareDir := filepath.Join(t.TempDir(), "bare")
 			tc.setup(t, bareDir)
 			err := gc.WorktreePrune(context.Background(), bareDir)
@@ -152,6 +165,7 @@ func TestShellGitClient_WorktreePrune(t *testing.T) {
 }
 
 func TestShellGitClient_WorktreeAdd(t *testing.T) {
+	t.Parallel()
 	gc := ShellGitClient{}
 
 	testCases := []struct {
@@ -161,17 +175,18 @@ func TestShellGitClient_WorktreeAdd(t *testing.T) {
 	}{
 		{
 			name: "happy path: adds worktree at ref",
-			ref:  "main",
+			ref:  branchMain,
 		},
 		{
 			name:        "error path: ref does not exist",
 			ref:         "no-such-branch",
-			expectedErr: "git",
+			expectedErr: gitCmd,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 			bareDir := filepath.Join(tmpDir, "bare")
 			wtDir := filepath.Join(tmpDir, "worktree")
@@ -189,6 +204,7 @@ func TestShellGitClient_WorktreeAdd(t *testing.T) {
 }
 
 func TestShellGitClient_VerifyCommit(t *testing.T) {
+	t.Parallel()
 	gc := ShellGitClient{}
 
 	testCases := []struct {
@@ -197,17 +213,18 @@ func TestShellGitClient_VerifyCommit(t *testing.T) {
 	}{
 		{
 			name:        "error path: fails without GPG key",
-			expectedErr: "git",
+			expectedErr: gitCmd,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 			bareDir := filepath.Join(tmpDir, "bare")
 			wtDir := filepath.Join(tmpDir, "worktree")
 			require.NoError(t, gc.BareClone(context.Background(), initGitRepo(t), bareDir))
-			require.NoError(t, gc.WorktreeAdd(context.Background(), bareDir, wtDir, "main"))
+			require.NoError(t, gc.WorktreeAdd(context.Background(), bareDir, wtDir, branchMain))
 
 			err := gc.VerifyCommit(context.Background(), wtDir)
 			if tc.expectedErr != "" {

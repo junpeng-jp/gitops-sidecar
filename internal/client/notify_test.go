@@ -14,6 +14,7 @@ import (
 )
 
 func TestHomeAssistantNotificationWebhook_Notify(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name           string
 		url            string
@@ -71,6 +72,7 @@ func TestHomeAssistantNotificationWebhook_Notify(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var gotBody []byte
 			var gotContentType string
 

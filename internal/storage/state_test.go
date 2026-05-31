@@ -10,7 +10,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	haConfig   = "ha-config"
+	repoAName  = "repo-a"
+	repoBName  = "repo-b"
+	repoCName  = "repo-c"
+	dummyURL   = "u"
+	wsPath     = "/ws"
+	wsHAConfig = "/ws/ha-config"
+	refMain    = "main"
+)
+
 func TestStateStore_Init(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name         string
 		repos        []model.RepoConfig
@@ -19,28 +31,29 @@ func TestStateStore_Init(t *testing.T) {
 	}{
 		{
 			name:         "single repo",
-			repos:        []model.RepoConfig{{Name: "ha-config", URL: "u"}},
-			workspaceDir: "/ws",
+			repos:        []model.RepoConfig{{Name: haConfig, URL: dummyURL}},
+			workspaceDir: wsPath,
 			expectedInit: map[string]model.RepoState{
-				"ha-config": {Name: "ha-config", State: model.StateInit, Ref: "", Path: "/ws/ha-config"},
+				haConfig: {Name: haConfig, State: model.StateInit, Ref: "", Path: wsHAConfig},
 			},
 		},
 		{
 			name: "multiple repos",
 			repos: []model.RepoConfig{
-				{Name: "repo-a", URL: "u"},
-				{Name: "repo-b", URL: "u"},
+				{Name: repoAName, URL: dummyURL},
+				{Name: repoBName, URL: dummyURL},
 			},
 			workspaceDir: "/workspace",
 			expectedInit: map[string]model.RepoState{
-				"repo-a": {Name: "repo-a", State: model.StateInit, Ref: "", Path: filepath.Join("/workspace", "repo-a")},
-				"repo-b": {Name: "repo-b", State: model.StateInit, Ref: "", Path: filepath.Join("/workspace", "repo-b")},
+				repoAName: {Name: repoAName, State: model.StateInit, Ref: "", Path: filepath.Join("/workspace", repoAName)},
+				repoBName: {Name: repoBName, State: model.StateInit, Ref: "", Path: filepath.Join("/workspace", repoBName)},
 			},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var s StateStore
 			s.Init(tc.repos, tc.workspaceDir)
 			for name, expected := range tc.expectedInit {
@@ -58,8 +71,9 @@ func TestStateStore_Init(t *testing.T) {
 }
 
 func TestStateStore_Get(t *testing.T) {
+	t.Parallel()
 	var s StateStore
-	s.Init([]model.RepoConfig{{Name: "ha-config", URL: "u"}}, "/ws")
+	s.Init([]model.RepoConfig{{Name: haConfig, URL: dummyURL}}, wsPath)
 
 	testCases := []struct {
 		name          string
@@ -69,7 +83,7 @@ func TestStateStore_Get(t *testing.T) {
 	}{
 		{
 			name:          "known name",
-			lookupName:    "ha-config",
+			lookupName:    haConfig,
 			expectFound:   true,
 			expectedState: model.StateInit,
 		},
@@ -82,6 +96,7 @@ func TestStateStore_Get(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			rs, ok := s.Get(tc.lookupName)
 			assert.Equal(t, tc.expectFound, ok)
 			if tc.expectFound {
@@ -92,6 +107,7 @@ func TestStateStore_Get(t *testing.T) {
 }
 
 func TestStateStore_SetAndGet(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC().Truncate(time.Second)
 
 	testCases := []struct {
@@ -103,14 +119,14 @@ func TestStateStore_SetAndGet(t *testing.T) {
 			name: "set ready with LastUpdatedAt",
 			setState: model.RepoState{
 				State:         model.StateReady,
-				Ref:           "main",
-				Path:          "/ws/ha-config",
+				Ref:           refMain,
+				Path:          wsHAConfig,
 				LastUpdatedAt: &now,
 			},
 			expectedState: model.RepoState{
 				State:         model.StateReady,
-				Ref:           "main",
-				Path:          "/ws/ha-config",
+				Ref:           refMain,
+				Path:          wsHAConfig,
 				LastUpdatedAt: &now,
 			},
 		},
@@ -118,14 +134,14 @@ func TestStateStore_SetAndGet(t *testing.T) {
 			name: "set error with Error field",
 			setState: model.RepoState{
 				State: model.StateError,
-				Ref:   "main",
-				Path:  "/ws/ha-config",
+				Ref:   refMain,
+				Path:  wsHAConfig,
 				Error: "clone failed",
 			},
 			expectedState: model.RepoState{
 				State: model.StateError,
-				Ref:   "main",
-				Path:  "/ws/ha-config",
+				Ref:   refMain,
+				Path:  wsHAConfig,
 				Error: "clone failed",
 			},
 		},
@@ -133,10 +149,11 @@ func TestStateStore_SetAndGet(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var s StateStore
-			s.Init([]model.RepoConfig{{Name: "ha-config", URL: "u"}}, "/ws")
-			s.Set("ha-config", tc.setState)
-			got, ok := s.Get("ha-config")
+			s.Init([]model.RepoConfig{{Name: haConfig, URL: dummyURL}}, wsPath)
+			s.Set(haConfig, tc.setState)
+			got, ok := s.Get(haConfig)
 			require.True(t, ok)
 			assert.Equal(t, tc.expectedState.State, got.State)
 			assert.Equal(t, tc.expectedState.Ref, got.Ref)
@@ -153,6 +170,7 @@ func TestStateStore_SetAndGet(t *testing.T) {
 }
 
 func TestStateStore_SetAll(t *testing.T) {
+	t.Parallel()
 	now := time.Now().UTC()
 
 	testCases := []struct {
@@ -171,16 +189,17 @@ func TestStateStore_SetAll(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var s StateStore
 			repos := []model.RepoConfig{
-				{Name: "repo-a", URL: "u"},
-				{Name: "repo-b", URL: "u"},
-				{Name: "repo-c", URL: "u"},
+				{Name: repoAName, URL: dummyURL},
+				{Name: repoBName, URL: dummyURL},
+				{Name: repoCName, URL: dummyURL},
 			}
-			s.Init(repos, "/ws")
-			s.Set("repo-a", model.RepoState{State: model.StateReady, Ref: "main", Path: "/ws/repo-a", LastUpdatedAt: &now})
-			s.Set("repo-b", model.RepoState{State: model.StateError, Ref: "main", Path: "/ws/repo-b", Error: "boom"})
-			s.Set("repo-c", model.RepoState{State: model.StateSyncing, Ref: "main", Path: "/ws/repo-c"})
+			s.Init(repos, wsPath)
+			s.Set(repoAName, model.RepoState{State: model.StateReady, Ref: refMain, Path: filepath.Join(wsPath, repoAName), LastUpdatedAt: &now})
+			s.Set(repoBName, model.RepoState{State: model.StateError, Ref: refMain, Path: filepath.Join(wsPath, repoBName), Error: "boom"})
+			s.Set(repoCName, model.RepoState{State: model.StateSyncing, Ref: refMain, Path: filepath.Join(wsPath, repoCName)})
 
 			s.SetAll(tc.targetState)
 
@@ -195,6 +214,7 @@ func TestStateStore_SetAll(t *testing.T) {
 }
 
 func TestStateStore_List(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name          string
 		repos         []model.RepoConfig
@@ -204,37 +224,38 @@ func TestStateStore_List(t *testing.T) {
 		{
 			name: "returns all repos sorted alphabetically when under limit",
 			repos: []model.RepoConfig{
-				{Name: "repo-c", URL: "u"},
-				{Name: "repo-a", URL: "u"},
-				{Name: "repo-b", URL: "u"},
+				{Name: repoCName, URL: dummyURL},
+				{Name: repoAName, URL: dummyURL},
+				{Name: repoBName, URL: dummyURL},
 			},
 			limit:         10,
-			expectedNames: []string{"repo-a", "repo-b", "repo-c"},
+			expectedNames: []string{repoAName, repoBName, repoCName},
 		},
 		{
 			name: "limit caps the number of results",
 			repos: []model.RepoConfig{
-				{Name: "repo-a", URL: "u"},
-				{Name: "repo-b", URL: "u"},
-				{Name: "repo-c", URL: "u"},
+				{Name: repoAName, URL: dummyURL},
+				{Name: repoBName, URL: dummyURL},
+				{Name: repoCName, URL: dummyURL},
 			},
 			limit:         2,
-			expectedNames: []string{"repo-a", "repo-b"},
+			expectedNames: []string{repoAName, repoBName},
 		},
 		{
 			name: "limit larger than repo count returns all",
 			repos: []model.RepoConfig{
-				{Name: "repo-a", URL: "u"},
+				{Name: repoAName, URL: dummyURL},
 			},
 			limit:         100,
-			expectedNames: []string{"repo-a"},
+			expectedNames: []string{repoAName},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var s StateStore
-			s.Init(tc.repos, "/ws")
+			s.Init(tc.repos, wsPath)
 			got := s.List(tc.limit)
 			require.Len(t, got, len(tc.expectedNames))
 			for i, name := range tc.expectedNames {

@@ -62,9 +62,9 @@ tasks:
         platforms: [darwin]
 
   test:
-    desc: Run all tests
+    desc: Run all tests with race detection
     cmds:
-      - go test ./...
+      - go test -race ./...
 
   lint:
     desc: Run golangci-lint
@@ -80,7 +80,7 @@ tasks:
   test:cover:
     desc: Run tests with coverage profile (coverage.out) and print overall coverage
     cmds:
-      - cmd: go test -coverprofile=coverage.out -coverpkg={{.COVERPKGS}} ./...
+      - cmd: go test -race -coverprofile=coverage.out -coverpkg={{.COVERPKGS}} ./...
         ignore_error: true
       - go tool cover -func=coverage.out | tail -1
 

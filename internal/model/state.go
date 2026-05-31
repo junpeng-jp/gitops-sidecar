@@ -16,7 +16,7 @@ type RepoState struct {
 	State         RepoStateKind `json:"state"`
 	Ref           string        `json:"ref"`
 	Path          string        `json:"path"`
-	LastUpdatedAt *time.Time    `json:"last_updated_at"`
+	LastUpdatedAt *time.Time    `json:"lastUpdatedAt"`
 	Error         string        `json:"error,omitempty"`
 }
 
@@ -37,11 +37,11 @@ const (
 // RepoChangedEvent is the webhook payload for any repo state transition.
 // POST /reset fires one event per repo.
 type RepoChangedEvent struct {
-	EventKind     NotificationEventKind `json:"event_kind"`
+	EventKind     NotificationEventKind `json:"eventKind"`
 	Name          string                `json:"name"`
 	State         RepoStateKind         `json:"state"`
-	PreviousState RepoStateKind         `json:"previous_state"`
+	PreviousState RepoStateKind         `json:"previousState"`
 	Ref           string                `json:"ref"`
-	LastUpdatedAt *time.Time            `json:"last_updated_at"`
+	LastUpdatedAt *time.Time            `json:"lastUpdatedAt"`
 	Error         string                `json:"error,omitempty"`
 }

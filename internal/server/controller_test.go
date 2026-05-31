@@ -36,6 +36,7 @@ func cancelledCtx() context.Context {
 }
 
 func TestGetRepos(t *testing.T) {
+	t.Parallel()
 	repos := []model.RepoConfig{{Name: "r", URL: "url"}}
 
 	testCases := []struct {
@@ -61,6 +62,7 @@ func TestGetRepos(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			c, _, _, _ := newTestGitOpsController(t, repos)
 			resp, err := c.GetRepos(tc.ctx, tc.request)
 			if tc.expectedErr != nil {
@@ -77,6 +79,7 @@ func TestGetRepos(t *testing.T) {
 }
 
 func TestGetRepo(t *testing.T) {
+	t.Parallel()
 	repos := []model.RepoConfig{{Name: "r", URL: "url"}}
 
 	testCases := []struct {
@@ -108,6 +111,7 @@ func TestGetRepo(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			c, _, _, _ := newTestGitOpsController(t, repos)
 			resp, err := c.GetRepo(tc.ctx, tc.request)
 			if tc.expectedErr != nil {
@@ -122,6 +126,7 @@ func TestGetRepo(t *testing.T) {
 }
 
 func TestRepoOperation(t *testing.T) {
+	t.Parallel()
 	defaultRepoConfig := []model.RepoConfig{{Name: "r", URL: "url"}}
 
 	readyWithBare := func(t *testing.T, cfg *Config, s *storage.StateStore) {
@@ -167,6 +172,7 @@ func TestRepoOperation(t *testing.T) {
 			name: "error: conflict when repo state is init",
 			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
+				t.Helper()
 				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
 			},
 			repoConfig:  defaultRepoConfig,
@@ -177,6 +183,7 @@ func TestRepoOperation(t *testing.T) {
 			name: "error: conflict when bare dir missing",
 			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
+				t.Helper()
 				rs, _ := s.Get("r")
 				rs.State = model.StateError
 				s.Set("r", rs)
@@ -205,6 +212,7 @@ func TestRepoOperation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			c, cfg, state, engine := newTestGitOpsController(t, tc.repoConfig)
 			if tc.setup != nil {
 				tc.setup(t, cfg, state)
@@ -233,6 +241,7 @@ func TestRepoOperation(t *testing.T) {
 }
 
 func TestReset(t *testing.T) {
+	t.Parallel()
 	defaultRepoConfig := []model.RepoConfig{
 		{Name: "r1", URL: "url1"},
 		{Name: "r2", URL: "url2"},
@@ -261,6 +270,7 @@ func TestReset(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			c, cfg, state, engine := newTestGitOpsController(t, tc.repoConfig)
 
 			sentinel := filepath.Join(cfg.WorkDir, "sentinel.txt")

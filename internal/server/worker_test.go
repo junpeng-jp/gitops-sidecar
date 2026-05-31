@@ -31,6 +31,7 @@ func newTestWorker(t *testing.T, repos []model.RepoConfig) (*Worker, *storage.St
 }
 
 func TestWorker_HandleInit(t *testing.T) {
+	t.Parallel()
 	repos := []model.RepoConfig{{Name: "r", URL: "git@github.com/r.git"}}
 
 	testCases := []struct {
@@ -71,6 +72,7 @@ func TestWorker_HandleInit(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			engine, state, git := newTestWorker(t, repos)
 
 			bareDir := filepath.Join(engine.cfg.WorkDir, "r", ".bare")
@@ -99,6 +101,7 @@ func TestWorker_HandleInit(t *testing.T) {
 }
 
 func TestWorker_HandlePull(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name          string
 		verifyCommit  bool
@@ -201,6 +204,7 @@ func TestWorker_HandlePull(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			repos := []model.RepoConfig{{Name: "r", URL: "url", VerifyCommit: tc.verifyCommit}}
 			engine, state, git := newTestWorker(t, repos)
 
@@ -228,6 +232,7 @@ func TestWorker_HandlePull(t *testing.T) {
 }
 
 func TestWorker_Enqueue(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name       string
 		prefill    int
@@ -247,6 +252,7 @@ func TestWorker_Enqueue(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			repos := []model.RepoConfig{{Name: "r", URL: "url"}}
 			engine, _, _ := newTestWorker(t, repos)
 
@@ -266,15 +272,16 @@ func TestWorker_Enqueue(t *testing.T) {
 			}
 
 			if !tc.expectDrop {
-				assert.Equal(t, 1, len(engine.cmdCh))
+				assert.Len(t, engine.cmdCh, 1)
 			} else {
-				assert.Equal(t, cap(engine.cmdCh), len(engine.cmdCh))
+				assert.Len(t, engine.cmdCh, cap(engine.cmdCh))
 			}
 		})
 	}
 }
 
 func TestWorker_Run(t *testing.T) {
+	t.Parallel()
 	testCases := []struct {
 		name          string
 		repos         []model.RepoConfig
@@ -328,6 +335,7 @@ func TestWorker_Run(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			engine, state, git := newTestWorker(t, tc.repos)
 
 			bareDir := filepath.Join(engine.cfg.WorkDir, "r", ".bare")
