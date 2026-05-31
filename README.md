@@ -12,7 +12,7 @@ Configuration has two parts: a JSON config file and environment variables.
 
 | Variable             | Required | Default                   | Description                  |
 |----------------------|----------|---------------------------|------------------------------|
-| `GITOPS_PORT`        | no       | `9001`                    | HTTP listen port             |
+| `GITOPS_PORT`        | no       | `57005`                   | HTTP listen port             |
 | `GITOPS_CONFIG_FILE` | no       | `/etc/gitops/config.json` | Path to the JSON config file |
 
 ### Config file
@@ -92,8 +92,8 @@ The sidecar does not manage SSH keys or known hosts. An init container must writ
   gitconfig              ← global git config (GIT_CONFIG_GLOBAL)
   ssh_config             ← SSH client config (referenced by GIT_SSH_COMMAND)
   known_hosts            ← referenced inside ssh_config
-  allowed-signers/
-    <repo-name>          ← per-repo; required only when verifyCommit: true
+  <repo-name>/
+    allowed-signers      ← per-repo; required only when verifyCommit: true
 ```
 
 When `runtimeDir` is set, the sidecar validates that required files exist before starting. If any are missing, the sidecar exits immediately. `gitconfig` is always required. `ssh_config` and `known_hosts` are only required when at least one repo URL uses the SSH protocol (`git@` or `ssh://`). When `runtimeDir` is set and valid, the sidecar sets these environment variables so all git subprocesses inherit them:
@@ -122,7 +122,7 @@ Add the following to `gitconfig` to point git at the correct allowed-signers fil
 
 ```ini
 [gpg "ssh"]
-  allowedSignersFile = /run/gitops-runtime/allowed-signers/<repo-name>
+  allowedSignersFile = /run/gitops-runtime/<repo-name>/allowed-signers
 ```
 
 ---
@@ -147,7 +147,7 @@ Add the following to `gitconfig` to point git at the correct allowed-signers fil
       "state": "ready",
       "ref": "main",
       "path": "/config/.gitops/repos/ha-config",
-      "last_updated_at": "2024-01-15T10:30:00Z"
+      "lastUpdatedAt": "2024-01-15T10:30:00Z"
     }
   ]
 }
@@ -164,7 +164,7 @@ The `error` field appears on a repo entry only when `state` is `error`.
     "state": "ready",
     "ref": "main",
     "path": "/config/.gitops/repos/ha-config",
-    "last_updated_at": "2024-01-15T10:30:00Z"
+    "lastUpdatedAt": "2024-01-15T10:30:00Z"
   }
 }
 ```
@@ -178,7 +178,7 @@ The `error` field appears on a repo entry only when `state` is `error`.
     "state": "syncing",
     "ref": "main",
     "path": "/config/.gitops/repos/ha-config",
-    "last_updated_at": "2024-01-15T10:30:00Z"
+    "lastUpdatedAt": "2024-01-15T10:30:00Z"
   }
 }
 ```
@@ -189,10 +189,20 @@ The only supported operation is `pull`, which requires a `ref` field:
 { "kind": "pull", "ref": "main" }
 ```
 
-`POST /reset` wipes both `workDir` and `workspaceDir`, then re-runs bare clones for all repos. It returns `202` on success:
+`POST /reset` clears each repo's subdirectory in `workDir` and `workspaceDir`, then re-runs bare clones for all repos. It returns `202` with the new state of each repo:
 
 ```json
-{ "success": true }
+{
+  "repos": [
+    {
+      "name": "ha-config",
+      "state": "resetting",
+      "ref": "main",
+      "path": "/config/.gitops/repos/ha-config",
+      "lastUpdatedAt": null
+    }
+  ]
+}
 ```
 
 On failure it returns an error status with:
@@ -203,12 +213,13 @@ On failure it returns an error status with:
 
 ### Repo states
 
-| State      | Meaning                                                           |
-|------------|-------------------------------------------------------------------|
-| `init`     | Bare clone in progress (set at startup or after reset)            |
-| `syncing`  | Fetch and worktree update in progress                             |
-| `ready`    | Worktree is current; `last_updated_at` is set                     |
-| `error`    | Last operation failed; `error` field contains the failure message |
+| State        | Meaning                                                           |
+|--------------|-------------------------------------------------------------------|
+| `init`       | Bare clone in progress (set at startup or after reset)            |
+| `syncing`    | Fetch and worktree update in progress                             |
+| `ready`      | Worktree is current; `lastUpdatedAt` is set                       |
+| `error`      | Last operation failed; `error` field contains the failure message |
+| `resetting`  | Reset in progress; wiping state before re-cloning                 |
 
 ### Error responses
 
@@ -216,7 +227,9 @@ On failure it returns an error status with:
 
 `404 Not Found` means the repo name in the request path is not in the config. Check the name against your config file.
 
-`409 Conflict` on `POST /repos/{name}/operation` means the repo is not ready to accept operations. This happens when the bare clone is still in progress (`init` state) or the bare directory does not exist. Wait for the repo to leave `init` state and retry.
+`409 Conflict` on `POST /repos/{name}/operation` means the repo is not ready to accept operations. This happens when the repo is in `init`, `syncing`, or `resetting` state, or when the bare directory does not exist. Wait for the repo to reach `ready` or `error` state and retry.
+
+`409 Conflict` on `POST /reset` means a reset is already in progress. Wait and retry.
 
 ---
 
@@ -232,12 +245,12 @@ Each POST delivers a batch of one or more `repo_changed` events. The body is alw
 {
   "updates": [
     {
-      "event_kind":      "repo_changed",
-      "name":            "ha-config",
-      "state":           "ready",
-      "previous_state":  "syncing",
-      "ref":             "main",
-      "last_updated_at": "2024-01-15T10:30:00Z"
+      "eventKind":     "repo_changed",
+      "name":          "ha-config",
+      "state":         "ready",
+      "previousState": "syncing",
+      "ref":           "main",
+      "lastUpdatedAt": "2024-01-15T10:30:00Z"
     }
   ]
 }
@@ -247,26 +260,26 @@ Error state example inside `updates`:
 
 ```json
 {
-  "event_kind":     "repo_changed",
-  "name":           "ha-config",
-  "state":          "error",
-  "previous_state": "syncing",
-  "ref":            "main",
-  "error":          "exit status 128: ..."
+  "eventKind":     "repo_changed",
+  "name":          "ha-config",
+  "state":         "error",
+  "previousState": "syncing",
+  "ref":           "main",
+  "error":         "exit status 128: ..."
 }
 ```
 
 ### Event fields
 
-| Field            | Type            | Always present | Description                                                     |
-|------------------|-----------------|----------------|-----------------------------------------------------------------|
-| `event_kind`     | string          | yes            | Always `"repo_changed"`                                         |
-| `name`           | string          | yes            | Repo name as configured                                         |
-| `state`          | string          | yes            | New state: `init`, `syncing`, `ready`, or `error`               |
-| `previous_state` | string          | yes            | State before this transition                                    |
-| `ref`            | string          | yes            | Git ref currently checked out; empty before the first successful pull or after reset |
-| `last_updated_at`| string (RFC3339)| yes (nullable) | Timestamp of the last successful pull; `null` until first success |
-| `error`          | string          | no             | Present only when `state` is `"error"`; contains the failure message |
+| Field           | Type            | Always present | Description                                                     |
+|-----------------|-----------------|----------------|-----------------------------------------------------------------|
+| `eventKind`     | string          | yes            | Always `"repo_changed"`                                         |
+| `name`          | string          | yes            | Repo name as configured                                         |
+| `state`         | string          | yes            | New state: `init`, `syncing`, `ready`, `error`, or `resetting`  |
+| `previousState` | string          | yes            | State before this transition                                    |
+| `ref`           | string          | yes            | Git ref currently checked out; empty before the first successful pull or after reset |
+| `lastUpdatedAt` | string (RFC3339)| yes (nullable) | Timestamp of the last successful pull; `null` until first success |
+| `error`         | string          | no             | Present only when `state` is `"error"`; contains the failure message |
 
 ### Delivery guarantees
 
@@ -275,4 +288,4 @@ Error state example inside `updates`:
 - The sidecar does not retry on delivery failures or non-2xx responses
 - A 10-second timeout applies to each POST; failures are logged but do not affect sidecar operation
 - Events for a single repo are delivered in the order transitions occur
-- `POST /reset` fires one `repo_changed` event per configured repo, with `state: "init"` and `ref: ""`
+- `POST /reset` fires one `repo_changed` event per configured repo with `state: "resetting"`; the `ref` field retains its value from before the reset
