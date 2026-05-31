@@ -8,12 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/junpeng-jp/gitops-sidecar/internal/model"
-	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
-	"github.com/junpeng-jp/gitops-sidecar/internal/testutils/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/junpeng-jp/gitops-sidecar/internal/model"
+	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
+	"github.com/junpeng-jp/gitops-sidecar/internal/testutils/mocks"
 )
 
 func newTestWorker(t *testing.T, repo model.RepoConfig) (*Worker, *storage.StateStore, *mocks.MockGitClient) {
@@ -29,6 +30,7 @@ func newTestWorker(t *testing.T, repo model.RepoConfig) (*Worker, *storage.State
 	cmdCh := make(chan model.Command, 16)
 	engine := NewWorker(cfg, repo, cmdCh, state, git, nil, slog.Default())
 	engine.enqueueTimeout = 50 * time.Millisecond
+
 	return engine, state, git
 }
 
@@ -52,7 +54,7 @@ func TestWorker_HandleInit(t *testing.T) {
 		{
 			name: "happy path: existing bare repo skips clone",
 			setupMock: func(git *mocks.MockGitClient, bareDir string) {
-				_ = os.MkdirAll(bareDir, 0o755)
+				_ = os.MkdirAll(bareDir, 0o750)
 				_ = os.WriteFile(filepath.Join(bareDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600)
 			},
 			expectedState: model.StateReady,
@@ -116,7 +118,7 @@ func TestWorker_HandlePull(t *testing.T) {
 				git.On("WorktreePrune", mock.Anything, bareDir).Return(nil)
 				git.On("WorktreeAdd", mock.Anything, bareDir, tmpDir, "main").
 					Return(nil).
-					Run(func(args mock.Arguments) { os.MkdirAll(args.String(2), 0o755) })
+					Run(func(args mock.Arguments) { _ = os.MkdirAll(args.String(2), 0o750) })
 			},
 			expectedState: model.StateReady,
 			expectUpdated: true,
@@ -131,7 +133,7 @@ func TestWorker_HandlePull(t *testing.T) {
 				git.On("WorktreePrune", mock.Anything, bareDir).Return(nil)
 				git.On("WorktreeAdd", mock.Anything, bareDir, tmpDir, "main").
 					Return(nil).
-					Run(func(args mock.Arguments) { os.MkdirAll(args.String(2), 0o755) })
+					Run(func(args mock.Arguments) { _ = os.MkdirAll(args.String(2), 0o750) })
 				git.On("VerifyCommit", mock.Anything, tmpDir).Return(nil)
 			},
 			expectedState: model.StateReady,
@@ -222,7 +224,7 @@ func TestWorker_HandleReset(t *testing.T) {
 		engine, state, _ := newTestWorker(t, repo)
 
 		bareDir := filepath.Join(engine.cfg.WorkDir, "r", ".bare")
-		require.NoError(t, os.MkdirAll(bareDir, 0o755))
+		require.NoError(t, os.MkdirAll(bareDir, 0o750))
 		sentinel := filepath.Join(bareDir, "HEAD")
 		require.NoError(t, os.WriteFile(sentinel, []byte("ref: refs/heads/main\n"), 0o600))
 
@@ -265,7 +267,7 @@ func TestWorker_Enqueue(t *testing.T) {
 		t.Parallel()
 		engine, _, _ := newTestWorker(t, repo)
 
-		for i := 0; i < cap(engine.cmdCh); i++ {
+		for range cap(engine.cmdCh) {
 			require.NoError(t, engine.Enqueue(model.PullCommand{Name: "r"}))
 		}
 
@@ -273,7 +275,7 @@ func TestWorker_Enqueue(t *testing.T) {
 		err := engine.Enqueue(model.PullCommand{Name: "r"})
 		elapsed := time.Since(start)
 
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.GreaterOrEqual(t, elapsed, 40*time.Millisecond)
 		assert.Less(t, elapsed, 500*time.Millisecond)
 	})
@@ -298,9 +300,10 @@ func TestWorker_Run(t *testing.T) {
 				git.On("WorktreePrune", mock.Anything, bareDir).Return(nil)
 				git.On("WorktreeAdd", mock.Anything, bareDir, tmpDir, "main").
 					Return(nil).
-					Run(func(args mock.Arguments) { os.MkdirAll(args.String(2), 0o755) })
+					Run(func(args mock.Arguments) { _ = os.MkdirAll(args.String(2), 0o750) })
 			},
 			enqueue: func(t *testing.T, e *Worker) {
+				t.Helper()
 				require.NoError(t, e.Enqueue(model.InitCommand{Name: "r"}))
 				require.NoError(t, e.Enqueue(model.PullCommand{Name: "r", Ref: "main"}))
 			},
@@ -313,6 +316,7 @@ func TestWorker_Run(t *testing.T) {
 				git.On("BareClone", mock.Anything, "url", bareDir).Return(errCloneFailed)
 			},
 			enqueue: func(t *testing.T, e *Worker) {
+				t.Helper()
 				require.NoError(t, e.Enqueue(model.InitCommand{Name: "r"}))
 			},
 			expectedState: model.StateError,
@@ -324,6 +328,7 @@ func TestWorker_Run(t *testing.T) {
 				git.On("BareClone", mock.Anything, "url", bareDir).Return(errCloneFailed)
 			},
 			enqueue: func(t *testing.T, e *Worker) {
+				t.Helper()
 				require.NoError(t, e.Enqueue(model.InitCommand{Name: "r"}))
 			},
 			expectedState: model.StateError,
@@ -333,6 +338,7 @@ func TestWorker_Run(t *testing.T) {
 			repo:      model.RepoConfig{Name: "r", URL: "url"},
 			setupMock: func(_ *mocks.MockGitClient, _, _ string) {},
 			enqueue: func(t *testing.T, e *Worker) {
+				t.Helper()
 				rs, err := e.state.Get("r")
 				require.NoError(t, err)
 				rs.State = model.StateResetting
@@ -348,6 +354,7 @@ func TestWorker_Run(t *testing.T) {
 			repo:      model.RepoConfig{Name: "r", URL: "url"},
 			setupMock: func(_ *mocks.MockGitClient, _, _ string) {},
 			enqueue: func(t *testing.T, e *Worker) {
+				t.Helper()
 				rs, err := e.state.Get("r")
 				require.NoError(t, err)
 				rs.State = model.StateResetting
@@ -369,8 +376,7 @@ func TestWorker_Run(t *testing.T) {
 			worktreeDir := filepath.Join(engine.cfg.WorkspaceDir, "r")
 			tc.setupMock(git, bareDir, worktreeDir)
 
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			go engine.Run(ctx)
 
 			tc.enqueue(t, engine)
@@ -378,6 +384,7 @@ func TestWorker_Run(t *testing.T) {
 			require.Eventually(t, func() bool {
 				rs, err := state.Get("r")
 				require.NoError(t, err)
+
 				return rs.State == tc.expectedState
 			}, 5*time.Second, 10*time.Millisecond)
 

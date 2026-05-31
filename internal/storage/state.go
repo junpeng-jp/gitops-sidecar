@@ -2,7 +2,6 @@ package storage
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -11,7 +10,10 @@ import (
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 )
 
-var ErrRepoNotFound = errors.New("repo not found")
+var (
+	ErrRepoNotFound           = errors.New("repo not found")
+	errResetAlreadyInProgress = errors.New("reset already in progress")
+)
 
 type StateStore struct {
 	mu    sync.RWMutex
@@ -38,6 +40,7 @@ func (s *StateStore) Get(name string) (model.RepoState, error) {
 	if !ok {
 		return model.RepoState{}, ErrRepoNotFound
 	}
+
 	return rs, nil
 }
 
@@ -60,6 +63,7 @@ func (s *StateStore) List(limit int) []model.RepoState {
 	if limit < len(out) {
 		out = out[:limit]
 	}
+
 	return out
 }
 func (s *StateStore) LockAll() ([]model.RepoState, map[string]model.RepoStateKind, error) {
@@ -67,7 +71,7 @@ func (s *StateStore) LockAll() ([]model.RepoState, map[string]model.RepoStateKin
 	defer s.mu.Unlock()
 	for _, rs := range s.repos {
 		if rs.State == model.StateResetting {
-			return nil, nil, fmt.Errorf("reset already in progress")
+			return nil, nil, errResetAlreadyInProgress
 		}
 	}
 	prev := make(map[string]model.RepoStateKind, len(s.repos))
@@ -83,6 +87,7 @@ func (s *StateStore) LockAll() ([]model.RepoState, map[string]model.RepoStateKin
 	slices.SortFunc(out, func(a, b model.RepoState) int {
 		return strings.Compare(a.Name, b.Name)
 	})
+
 	return out, prev, nil
 }
 

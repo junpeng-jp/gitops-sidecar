@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -19,10 +18,26 @@ type GitOpsServer struct {
 	log        *slog.Logger
 }
 
-func NewServer(cfg *Config, state *storage.StateStore, workers map[string]*Worker, notifier *NotificationWorker, log *slog.Logger, version, commit, date string) *GitOpsServer {
+func NewServer(
+	cfg *Config,
+	state *storage.StateStore,
+	workers map[string]*Worker,
+	notifier *NotificationWorker,
+	log *slog.Logger,
+	version, commit, date string,
+) *GitOpsServer {
 	s := &GitOpsServer{
-		controller: &GitOpsController{cfg: cfg, state: state, workers: workers, notifier: notifier, log: log, version: version, commit: commit, date: date},
-		log:        log,
+		controller: &GitOpsController{
+			cfg:      cfg,
+			state:    state,
+			workers:  workers,
+			notifier: notifier,
+			log:      log,
+			version:  version,
+			commit:   commit,
+			date:     date,
+		},
+		log: log,
 	}
 
 	mux := http.NewServeMux()
@@ -33,9 +48,11 @@ func NewServer(cfg *Config, state *storage.StateStore, workers map[string]*Worke
 	mux.HandleFunc("POST /reset", s.handleReset)
 
 	s.server = &http.Server{
-		Addr:    fmt.Sprintf(":%s", cfg.Port),
-		Handler: mux,
+		Addr:              ":" + cfg.Port,
+		Handler:           mux,
+		ReadHeaderTimeout: defaultEnqueueTimeout,
 	}
+
 	return s
 }
 
@@ -52,18 +69,24 @@ func (s *GitOpsServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, http.StatusOK, resp, err)
 }
 
+const (
+	defaultLimit = 10
+	maxLimit     = 100
+)
+
 func (s *GitOpsServer) handleGetRepos(w http.ResponseWriter, r *http.Request) {
-	limit := 10
+	limit := defaultLimit
 	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if n, err := strconv.Atoi(raw); err == nil {
+		n, err := strconv.Atoi(raw)
+		if err == nil {
 			limit = n
 		}
 	}
 	if limit < 1 {
 		limit = 1
 	}
-	if limit > 100 {
-		limit = 100
+	if limit > maxLimit {
+		limit = maxLimit
 	}
 	req := model.GetReposRequest{Limit: limit}
 	resp, err := s.controller.GetRepos(r.Context(), req)
@@ -81,6 +104,7 @@ func (s *GitOpsServer) handleRepoOperation(w http.ResponseWriter, r *http.Reques
 	err := json.NewDecoder(r.Body).Decode(&body)
 	if err != nil {
 		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+
 		return
 	}
 	req := model.RepoOperationRequest{
@@ -99,6 +123,7 @@ func (s *GitOpsServer) handleReset(w http.ResponseWriter, r *http.Request) {
 func (s *GitOpsServer) writeResponse(w http.ResponseWriter, successStatus int, v any, err error) {
 	if err != nil {
 		s.writeJSON(w, errorStatus(err), map[string]string{"error": err.Error()})
+
 		return
 	}
 	s.writeJSON(w, successStatus, v)
@@ -120,7 +145,8 @@ func errorStatus(err error) int {
 func (s *GitOpsServer) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	err := json.NewEncoder(w).Encode(v)
+	if err != nil {
 		s.log.Error("writeJSON encode", "err", err)
 	}
 }

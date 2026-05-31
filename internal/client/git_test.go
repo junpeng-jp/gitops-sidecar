@@ -33,6 +33,7 @@ func initGitRepo(t *testing.T) string {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("hello"), 0600))
 	mustRun(t, "-C", dir, "add", ".")
 	mustRun(t, "-C", dir, "commit", "-m", "init")
+
 	return dir
 }
 
@@ -53,6 +54,7 @@ func TestShellGitClient_BareClone(t *testing.T) {
 			name: "error path: invalid URL",
 			setup: func(t *testing.T) string {
 				t.Helper()
+
 				return "/definitely/not/a/repo"
 			},
 			expectedErr: gitCmd,

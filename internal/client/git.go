@@ -38,12 +38,14 @@ func (g ShellGitClient) VerifyCommit(ctx context.Context, worktreeDir string) er
 }
 
 func runGit(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...) //nolint:gosec
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if err != nil {
 		return fmt.Errorf("git %v: %w; output: %s", args, err, buf.String())
 	}
+
 	return nil
 }

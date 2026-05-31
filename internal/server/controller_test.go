@@ -9,15 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/junpeng-jp/gitops-sidecar/internal/model"
-	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
-	"github.com/junpeng-jp/gitops-sidecar/internal/testutils/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+
+	"github.com/junpeng-jp/gitops-sidecar/internal/model"
+	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
+	"github.com/junpeng-jp/gitops-sidecar/internal/testutils/mocks"
 )
 
-func newTestGitOpsController(t *testing.T, repos []model.RepoConfig) (*GitOpsController, *Config, *storage.StateStore, map[string]*Worker, map[string]*mocks.MockGitClient) {
+func newTestGitOpsController(
+	t *testing.T,
+	repos []model.RepoConfig,
+) (*GitOpsController, *Config, *storage.StateStore, map[string]*Worker, map[string]*mocks.MockGitClient) {
 	t.Helper()
 	cfg := &Config{
 		WorkDir:      t.TempDir(),
@@ -37,6 +41,7 @@ func newTestGitOpsController(t *testing.T, repos []model.RepoConfig) (*GitOpsCon
 		gits[repo.Name] = git
 	}
 	c := &GitOpsController{cfg: cfg, state: state, workers: workers, log: slog.Default()}
+
 	return c, cfg, state, workers, gits
 }
 
@@ -46,14 +51,12 @@ func TestGetRepos(t *testing.T) {
 
 	testCases := []struct {
 		name             string
-		ctx              context.Context
 		request          model.GetReposRequest
 		expectedErr      error
 		expectedResponse model.GetReposResponse
 	}{
 		{
 			name:             "happy path: returns repo list",
-			ctx:              context.Background(),
 			request:          model.GetReposRequest{Limit: 10},
 			expectedResponse: model.GetReposResponse{Repos: []model.RepoState{{Name: "r", State: model.StateInit}}},
 		},
@@ -62,10 +65,12 @@ func TestGetRepos(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctx := context.Background()
 			c, _, _, _, _ := newTestGitOpsController(t, repos)
-			resp, err := c.GetRepos(tc.ctx, tc.request)
+			resp, err := c.GetRepos(ctx, tc.request)
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
+
 				return
 			}
 			require.NoError(t, err)
@@ -83,20 +88,17 @@ func TestGetRepo(t *testing.T) {
 
 	testCases := []struct {
 		name             string
-		ctx              context.Context
 		request          model.GetRepoRequest
 		expectedErr      error
 		expectedResponse model.GetRepoResponse
 	}{
 		{
 			name:             "happy path: returns repo state",
-			ctx:              context.Background(),
 			request:          model.GetRepoRequest{Name: "r"},
 			expectedResponse: model.GetRepoResponse{Repo: model.RepoState{Name: "r", State: model.StateInit}},
 		},
 		{
 			name:        "error path: not found for unknown repo",
-			ctx:         context.Background(),
 			request:     model.GetRepoRequest{Name: "unknown"},
 			expectedErr: errNotFound,
 		},
@@ -105,10 +107,12 @@ func TestGetRepo(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctx := context.Background()
 			c, _, _, _, _ := newTestGitOpsController(t, repos)
-			resp, err := c.GetRepo(tc.ctx, tc.request)
+			resp, err := c.GetRepo(ctx, tc.request)
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
+
 				return
 			}
 			require.NoError(t, err)
@@ -128,12 +132,11 @@ func TestRepoOperation(t *testing.T) {
 		require.NoError(t, err)
 		rs.State = model.StateReady
 		s.Set("r", rs)
-		require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
+		require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o750))
 	}
 
 	testCases := []struct {
 		name             string
-		ctx              context.Context
 		setup            func(*testing.T, *Config, *storage.StateStore)
 		repoConfig       []model.RepoConfig
 		request          model.RepoOperationRequest
@@ -141,64 +144,73 @@ func TestRepoOperation(t *testing.T) {
 		expectedResponse model.RepoOperationResponse
 	}{
 		{
-			name:             "happy path: enqueues pull",
-			ctx:              context.Background(),
-			setup:            readyWithBare,
-			repoConfig:       defaultRepoConfig,
-			request:          model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			name:       "happy path: enqueues pull",
+			setup:      readyWithBare,
+			repoConfig: defaultRepoConfig,
+			request: model.RepoOperationRequest{
+				Name: "r",
+				Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"},
+			},
 			expectedResponse: model.RepoOperationResponse{Repo: model.RepoState{Name: "r", State: model.StateReady}},
 		},
 		{
-			name:        "error path: not found for unknown repo",
-			ctx:         context.Background(),
-			repoConfig:  defaultRepoConfig,
-			request:     model.RepoOperationRequest{Name: "unknown", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			name:       "error path: not found for unknown repo",
+			repoConfig: defaultRepoConfig,
+			request: model.RepoOperationRequest{
+				Name: "unknown",
+				Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"},
+			},
 			expectedErr: errNotFound,
 		},
 		{
 			name: "error path: conflict when repo state is init",
-			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
 				t.Helper()
-				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
+				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o750))
 			},
-			repoConfig:  defaultRepoConfig,
-			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			repoConfig: defaultRepoConfig,
+			request: model.RepoOperationRequest{
+				Name: "r",
+				Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"},
+			},
 			expectedErr: errConflict,
 		},
 		{
 			name: "error path: conflict when repo state is syncing",
-			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
 				t.Helper()
 				rs, err := s.Get("r")
 				require.NoError(t, err)
 				rs.State = model.StateSyncing
 				s.Set("r", rs)
-				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
+				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o750))
 			},
-			repoConfig:  defaultRepoConfig,
-			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			repoConfig: defaultRepoConfig,
+			request: model.RepoOperationRequest{
+				Name: "r",
+				Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"},
+			},
 			expectedErr: errConflict,
 		},
 		{
 			name: "error path: conflict when repo state is resetting",
-			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
 				t.Helper()
 				rs, err := s.Get("r")
 				require.NoError(t, err)
 				rs.State = model.StateResetting
 				s.Set("r", rs)
-				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
+				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o750))
 			},
-			repoConfig:  defaultRepoConfig,
-			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			repoConfig: defaultRepoConfig,
+			request: model.RepoOperationRequest{
+				Name: "r",
+				Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"},
+			},
 			expectedErr: errConflict,
 		},
 		{
 			name: "error path: conflict when bare dir missing",
-			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
 				t.Helper()
 				rs, err := s.Get("r")
@@ -206,21 +218,25 @@ func TestRepoOperation(t *testing.T) {
 				rs.State = model.StateError
 				s.Set("r", rs)
 			},
-			repoConfig:  defaultRepoConfig,
-			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			repoConfig: defaultRepoConfig,
+			request: model.RepoOperationRequest{
+				Name: "r",
+				Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"},
+			},
 			expectedErr: errConflict,
 		},
 		{
-			name:        "error path: bad request when ref is empty",
-			ctx:         context.Background(),
-			setup:       readyWithBare,
-			repoConfig:  defaultRepoConfig,
-			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: ""}},
+			name:       "error path: bad request when ref is empty",
+			setup:      readyWithBare,
+			repoConfig: defaultRepoConfig,
+			request: model.RepoOperationRequest{
+				Name: "r",
+				Body: model.RepoOperationBody{Kind: model.PullKind, Ref: ""},
+			},
 			expectedErr: errBadRequest,
 		},
 		{
 			name:        "error path: bad request for unknown operation kind",
-			ctx:         context.Background(),
 			setup:       readyWithBare,
 			repoConfig:  defaultRepoConfig,
 			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: "unknown"}},
@@ -231,15 +247,17 @@ func TestRepoOperation(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			ctx := context.Background()
 			c, cfg, state, workers, _ := newTestGitOpsController(t, tc.repoConfig)
 			if tc.setup != nil {
 				tc.setup(t, cfg, state)
 			}
 
-			resp, err := c.RepoOperation(tc.ctx, tc.request)
+			resp, err := c.RepoOperation(ctx, tc.request)
 
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
+
 				return
 			}
 			require.NoError(t, err)
@@ -289,8 +307,8 @@ func TestReset(t *testing.T) {
 		// Create per-repo sentinel files that should be removed by reset.
 		for _, repo := range repos {
 			dir := filepath.Join(cfg.WorkDir, repo.Name)
-			require.NoError(t, os.MkdirAll(dir, 0o755))
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "sentinel.txt"), []byte("data"), 0o644))
+			require.NoError(t, os.MkdirAll(dir, 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "sentinel.txt"), []byte("data"), 0o600))
 		}
 
 		resp, err := c.Reset(context.Background())
@@ -315,6 +333,7 @@ func TestReset(t *testing.T) {
 					return false
 				}
 			}
+
 			return true
 		}, 5*time.Second, 10*time.Millisecond)
 

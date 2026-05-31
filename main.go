@@ -1,7 +1,8 @@
-package main
+package main //nolint:cyclop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,9 +18,12 @@ import (
 	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
 )
 
+//nolint:gochecknoglobals
 var version, commit, date = "dev", "unknown", "unknown"
 
-func main() {
+const shutdownTimeout = 10 * time.Second
+
+func main() { //nolint:funlen
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	logger.Info("starting", "version", version, "commit", commit, "date", date)
 
@@ -29,22 +33,33 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := os.RemoveAll(cfg.WorkDir); err != nil {
+	err = os.RemoveAll(cfg.WorkDir)
+	if err != nil {
 		logger.Error("wipe workDir", "err", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(cfg.WorkDir, 0o755); err != nil {
+	err = os.MkdirAll(cfg.WorkDir, 0o750)
+	if err != nil {
 		logger.Error("create workDir", "err", err)
 		os.Exit(1)
 	}
-	if err := os.MkdirAll(cfg.WorkspaceDir, 0o755); err != nil {
+	err = os.MkdirAll(cfg.WorkspaceDir, 0o750)
+	if err != nil {
 		logger.Error("create workspaceDir", "err", err)
 		os.Exit(1)
 	}
 
 	if cfg.RuntimeDir != "" {
-		os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(cfg.RuntimeDir, "gitconfig"))
-		os.Setenv("GIT_SSH_COMMAND", fmt.Sprintf("ssh -F '%s'", filepath.Join(cfg.RuntimeDir, "ssh_config")))
+		err = os.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(cfg.RuntimeDir, "gitconfig"))
+		if err != nil {
+			logger.Error("set GIT_CONFIG_GLOBAL", "err", err)
+			os.Exit(1)
+		}
+		err = os.Setenv("GIT_SSH_COMMAND", fmt.Sprintf("ssh -F '%s'", filepath.Join(cfg.RuntimeDir, "ssh_config")))
+		if err != nil {
+			logger.Error("set GIT_SSH_COMMAND", "err", err)
+			os.Exit(1)
+		}
 	}
 
 	var state storage.StateStore
@@ -79,13 +94,15 @@ func main() {
 
 	go func() {
 		logger.Info("server listening", "port", cfg.Port)
-		if err := gitOpsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		err := gitOpsServer.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.Error("server", "err", err)
 		}
 	}()
 
 	for _, repo := range cfg.Repos {
-		if err := workers[repo.Name].Enqueue(model.InitCommand{Name: repo.Name}); err != nil {
+		err := workers[repo.Name].Enqueue(model.InitCommand{Name: repo.Name})
+		if err != nil {
 			logger.Error("enqueue init command", "repo", repo.Name, "err", err)
 		}
 	}
@@ -93,9 +110,10 @@ func main() {
 	<-ctx.Done()
 	logger.Info("shutting down")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := gitOpsServer.Shutdown(shutdownCtx); err != nil {
+	err = gitOpsServer.Shutdown(shutdownCtx)
+	if err != nil {
 		logger.Error("server shutdown", "err", err)
 	}
 }

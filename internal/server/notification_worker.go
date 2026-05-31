@@ -9,6 +9,8 @@ import (
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 )
 
+const drainTimeout = 5 * time.Second
+
 type NotificationWorker struct {
 	notifier      client.NotificationClient
 	ch            chan model.RepoChangedEvent
@@ -17,7 +19,12 @@ type NotificationWorker struct {
 	log           *slog.Logger
 }
 
-func NewNotificationWorker(notifier client.NotificationClient, ch chan model.RepoChangedEvent, cfg *model.NotificationConfig, log *slog.Logger) *NotificationWorker {
+func NewNotificationWorker(
+	notifier client.NotificationClient,
+	ch chan model.RepoChangedEvent,
+	cfg *model.NotificationConfig,
+	log *slog.Logger,
+) *NotificationWorker {
 	return &NotificationWorker{
 		notifier:      notifier,
 		ch:            ch,
@@ -42,7 +49,8 @@ func (n *NotificationWorker) Run(ctx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		if err := n.notifier.Notify(flushCtx, batch); err != nil {
+		err := n.notifier.Notify(flushCtx, batch)
+		if err != nil {
 			n.log.Error("notify failed", "err", err)
 		}
 		batch = batch[:0]
@@ -52,23 +60,26 @@ func (n *NotificationWorker) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			// Drain any events that arrived just before shutdown and do a final flush.
-			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			// Start a new timeout context to allow draining of pending commands
+			drainCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 			defer cancel()
 			for {
 				select {
 				case event := <-n.ch:
 					batch = append(batch, event)
 					if len(batch) >= n.maxBatchSize {
-						flush(drainCtx)
+						flush(drainCtx) //nolint:contextcheck
 					}
 				default:
-					flush(drainCtx)
+					flush(drainCtx) //nolint:contextcheck
+
 					return
 				}
 			}
 		case event, ok := <-n.ch:
 			if !ok {
 				flush(ctx)
+
 				return
 			}
 			batch = append(batch, event)

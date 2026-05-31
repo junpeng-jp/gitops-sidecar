@@ -8,9 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 )
 
 func writeConfigFile(t *testing.T, cfg any) string {
@@ -19,6 +20,7 @@ func writeConfigFile(t *testing.T, cfg any) string {
 	require.NoError(t, err)
 	path := filepath.Join(t.TempDir(), "config.json")
 	require.NoError(t, os.WriteFile(path, data, 0600))
+
 	return path
 }
 
@@ -34,24 +36,30 @@ func writeRuntimeDir(t *testing.T, repos []model.RepoConfig) string {
 			for _, name := range []string{"ssh_config", "known_hosts"} {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(""), 0600))
 			}
+
 			break
 		}
 	}
 	for _, repo := range repos {
 		if repo.VerifyCommit {
-			signerDir := filepath.Join(dir, "allowed-signers")
-			require.NoError(t, os.MkdirAll(signerDir, 0755))
-			require.NoError(t, os.WriteFile(filepath.Join(signerDir, repo.Name), []byte(""), 0600))
+			repoDir := filepath.Join(dir, repo.Name)
+			require.NoError(t, os.MkdirAll(repoDir, 0o750))
+			require.NoError(t, os.WriteFile(filepath.Join(repoDir, "allowed-signers"), []byte(""), 0600))
 		}
 	}
+
 	return dir
 }
 
 func TestLoadConfig(t *testing.T) {
 	validRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git"}
-	validRepoWithDefaults := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git", CommandQueueSize: 16}
+	validRepoWithDefaults := model.RepoConfig{
+		Name:             "ha-config",
+		URL:              "git@github.com:org/ha-config.git",
+		CommandQueueSize: 16,
+	}
 	defaultConfig := Config{
-		Port:         "9001",
+		Port:         "57005",
 		WorkDir:      "/tmp/gitops",
 		WorkspaceDir: "/config/.gitops",
 		Repos:        []model.RepoConfig{validRepoWithDefaults},
@@ -81,11 +89,17 @@ func TestLoadConfig(t *testing.T) {
 				"notification": map[string]any{"type": "ha-webhook", "url": "http://ha.local/webhook"},
 			},
 			expectedConfig: &Config{
-				Port:         "9001",
+				Port:         "57005",
 				WorkDir:      "/tmp/custom",
 				WorkspaceDir: "/config/.gitops",
 				Repos:        []model.RepoConfig{validRepoWithDefaults},
-				Notification: &model.NotificationConfig{Type: "ha-webhook", URL: "http://ha.local/webhook", QueueSize: 64, MaxBatchSize: 16, BatchInterval: model.Duration(3 * time.Second)},
+				Notification: &model.NotificationConfig{
+					Type:          model.NotificationTypeHAWebhook,
+					URL:           "http://ha.local/webhook",
+					QueueSize:     64,
+					MaxBatchSize:  16,
+					BatchInterval: model.Duration(3 * time.Second),
+				},
 			},
 		},
 		{
@@ -98,6 +112,7 @@ func TestLoadConfig(t *testing.T) {
 			expectedConfig: func() *Config {
 				c := defaultConfig
 				c.Port = "8080"
+
 				return &c
 			}(),
 		},
@@ -145,7 +160,11 @@ func TestLoadConfig(t *testing.T) {
 			configJSON: map[string]any{
 				"workspaceDir": "/config/.gitops",
 				"repos":        []model.RepoConfig{validRepo},
-				"notification": map[string]any{"type": "ha-webhook", "url": "http://ha.local/webhook", "maxBatchSize": -1},
+				"notification": map[string]any{
+					"type":         "ha-webhook",
+					"url":          "http://ha.local/webhook",
+					"maxBatchSize": -1,
+				},
 			},
 			expectedErr: errInvalidMaxBatchSize,
 		},
@@ -154,7 +173,11 @@ func TestLoadConfig(t *testing.T) {
 			configJSON: map[string]any{
 				"workspaceDir": "/config/.gitops",
 				"repos":        []model.RepoConfig{validRepo},
-				"notification": map[string]any{"type": "ha-webhook", "url": "http://ha.local/webhook", "batchInterval": "-1s"},
+				"notification": map[string]any{
+					"type":          "ha-webhook",
+					"url":           "http://ha.local/webhook",
+					"batchInterval": "-1s",
+				},
 			},
 			expectedErr: errInvalidBatchInterval,
 		},
@@ -191,6 +214,7 @@ func TestLoadConfig(t *testing.T) {
 
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
+
 				return
 			}
 
@@ -200,7 +224,7 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestValidateSSHRuntime(t *testing.T) {
+func TestValidateRuntimeDir(t *testing.T) {
 	t.Parallel()
 	sshRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git"}
 	httpsRepo := model.RepoConfig{Name: "ha-config", URL: "https://github.com/org/ha-config.git"}
@@ -216,6 +240,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 			name: "valid runtime dir with SSH repo",
 			setup: func(t *testing.T) string {
 				t.Helper()
+
 				return writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 			},
 			repos: []model.RepoConfig{sshRepo},
@@ -227,6 +252,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 				// Only gitconfig — no SSH files needed for HTTPS repos.
 				dir := t.TempDir()
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "gitconfig"), []byte(""), 0600))
+
 				return dir
 			},
 			repos: []model.RepoConfig{httpsRepo},
@@ -238,6 +264,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 				// Has gitconfig only — missing ssh_config/known_hosts.
 				dir := t.TempDir()
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "gitconfig"), []byte(""), 0600))
+
 				return dir
 			},
 			repos:       []model.RepoConfig{httpsRepo, sshRepo},
@@ -247,6 +274,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 			name: "runtimeDir does not exist",
 			setup: func(t *testing.T) string {
 				t.Helper()
+
 				return filepath.Join(t.TempDir(), "nonexistent")
 			},
 			repos:       []model.RepoConfig{sshRepo},
@@ -258,6 +286,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 				t.Helper()
 				dir := writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "gitconfig")))
+
 				return dir
 			},
 			repos:       []model.RepoConfig{sshRepo},
@@ -269,6 +298,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 				t.Helper()
 				dir := writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "ssh_config")))
+
 				return dir
 			},
 			repos:       []model.RepoConfig{sshRepo},
@@ -280,6 +310,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 				t.Helper()
 				dir := writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "known_hosts")))
+
 				return dir
 			},
 			repos:       []model.RepoConfig{sshRepo},
@@ -289,6 +320,7 @@ func TestValidateSSHRuntime(t *testing.T) {
 			name: "verifyCommit repo missing allowed-signers file",
 			setup: func(t *testing.T) string {
 				t.Helper()
+
 				return writeRuntimeDir(t, []model.RepoConfig{sshRepo}) // no VerifyCommit, so no allowed-signers written
 			},
 			repos:       []model.RepoConfig{verifyRepo},
@@ -300,10 +332,11 @@ func TestValidateSSHRuntime(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runtimeDir := tc.setup(t)
-			err := validateSSHRuntime(runtimeDir, tc.repos)
+			err := validateRuntimeDir(runtimeDir, tc.repos)
 
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
+
 				return
 			}
 			require.NoError(t, err)
@@ -321,17 +354,16 @@ func TestLoadConfigWithRuntimeDir(t *testing.T) {
 		expectedErr error
 	}{
 		{
-			name:  "valid runtimeDir is accepted",
-			repos: []model.RepoConfig{validRepo},
-			runtimeDir: func(t *testing.T, repos []model.RepoConfig) string {
-				return writeRuntimeDir(t, repos)
-			},
+			name:       "valid runtimeDir is accepted",
+			repos:      []model.RepoConfig{validRepo},
+			runtimeDir: writeRuntimeDir,
 		},
 		{
 			name:  "runtimeDir set but directory missing fails at load",
 			repos: []model.RepoConfig{validRepo},
 			runtimeDir: func(t *testing.T, _ []model.RepoConfig) string {
 				t.Helper()
+
 				return filepath.Join(t.TempDir(), "nonexistent")
 			},
 			expectedErr: errRuntimeDirMissing,
@@ -352,6 +384,7 @@ func TestLoadConfigWithRuntimeDir(t *testing.T) {
 
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
+
 				return
 			}
 

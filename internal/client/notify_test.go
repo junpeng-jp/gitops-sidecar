@@ -8,9 +8,10 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 )
 
 func TestHomeAssistantNotificationWebhook_Notify(t *testing.T) {
@@ -60,12 +61,16 @@ func TestHomeAssistantNotificationWebhook_Notify(t *testing.T) {
 		{
 			name:         "error path: server error does not panic",
 			serverStatus: http.StatusInternalServerError,
-			events:       []model.RepoChangedEvent{{EventKind: model.EventKindRepoChanged, Name: "r", State: model.StateReady}},
+			events: []model.RepoChangedEvent{
+				{EventKind: model.EventKindRepoChanged, Name: "r", State: model.StateReady},
+			},
 		},
 		{
-			name:        "error path: connection refused returns error",
-			url:         "http://127.0.0.1:1",
-			events:      []model.RepoChangedEvent{{EventKind: model.EventKindRepoChanged, Name: "r", State: model.StateReady}},
+			name: "error path: connection refused returns error",
+			url:  "http://127.0.0.1:1",
+			events: []model.RepoChangedEvent{
+				{EventKind: model.EventKindRepoChanged, Name: "r", State: model.StateReady},
+			},
 			expectError: true,
 		},
 	}

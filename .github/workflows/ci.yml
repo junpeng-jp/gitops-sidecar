@@ -10,7 +10,6 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
-    if: false    # skipped lint for now
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +58,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [test]    # skipped lint for now
+    needs: [lint, test]
     steps:
       - uses: actions/checkout@v4
 
