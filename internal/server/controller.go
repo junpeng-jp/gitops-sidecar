@@ -22,7 +22,7 @@ var (
 type GitOpsController struct {
 	cfg      *Config
 	state    *storage.StateStore
-	engine   *Worker
+	workers  map[string]*Worker
 	notifier *NotificationWorker
 	log      *slog.Logger
 	version  string
@@ -58,6 +58,8 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not initialised: %s: %w", req.Name, errConflict)
 	case model.StateSyncing:
 		return model.RepoOperationResponse{}, fmt.Errorf("repo sync already in progress: %s: %w", req.Name, errConflict)
+	case model.StateResetting:
+		return model.RepoOperationResponse{}, fmt.Errorf("repo reset in progress: %s: %w", req.Name, errConflict)
 	}
 	bareDir := filepath.Join(c.cfg.WorkDir, req.Name, ".bare")
 	if _, err := os.Stat(bareDir); errors.Is(err, os.ErrNotExist) {
@@ -66,12 +68,17 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 		return model.RepoOperationResponse{}, fmt.Errorf("stat bare dir %s: %w", bareDir, err)
 	}
 
+	w, ok := c.workers[req.Name]
+	if !ok {
+		return model.RepoOperationResponse{}, fmt.Errorf("repo not found: %s: %w", req.Name, errNotFound)
+	}
+
 	switch req.Body.Kind {
 	case model.PullKind:
 		if req.Body.Ref == "" {
 			return model.RepoOperationResponse{}, fmt.Errorf("ref is required for pull: %w", errBadRequest)
 		}
-		if err := c.engine.Enqueue(model.PullCommand{Name: req.Name, Ref: req.Body.Ref}); err != nil {
+		if err := w.Enqueue(model.PullCommand{Name: req.Name, Ref: req.Body.Ref}); err != nil {
 			return model.RepoOperationResponse{}, fmt.Errorf("enqueue pull: %w", err)
 		}
 		rs, err = c.state.Get(req.Name)
@@ -84,65 +91,48 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 	}
 }
 
-const resetLockTimeout = 10 * time.Second
+func (c *GitOpsController) notify(rs model.RepoState, prev model.RepoStateKind) {
+	if c.notifier == nil {
+		return
+	}
+	event := model.RepoChangedEvent{
+		EventKind:     model.EventKindRepoChanged,
+		Name:          rs.Name,
+		State:         rs.State,
+		PreviousState: prev,
+		Ref:           rs.Ref,
+		LastUpdatedAt: rs.LastUpdatedAt,
+		Error:         rs.Error,
+	}
+	t := time.NewTimer(3 * time.Second)
+	defer t.Stop()
+	select {
+	case c.notifier.Chan() <- event:
+	case <-t.C:
+		c.log.Warn("notify: queue full, dropping event", "repo", rs.Name, "state", rs.State)
+	}
+}
 
 func (c *GitOpsController) Reset(_ context.Context) (model.ResetResponse, error) {
-	lockCtx, cancel := context.WithTimeout(context.Background(), resetLockTimeout)
-	defer cancel()
-
-	unlock, err := c.engine.AcquireResetLock(lockCtx)
+	newStates, prevKinds, err := c.state.LockAll()
 	if err != nil {
-		return model.ResetResponse{}, fmt.Errorf("reset: waiting for in-flight operation timed out: %w", err)
-	}
-	defer unlock()
-
-	// Discard any commands that were pending before the reset.
-	c.engine.DrainCommands()
-
-	if err := os.RemoveAll(c.cfg.WorkDir); err != nil {
-		return model.ResetResponse{}, fmt.Errorf("remove work dir: %w", err)
-	}
-	if err := os.RemoveAll(c.cfg.WorkspaceDir); err != nil {
-		return model.ResetResponse{}, fmt.Errorf("remove workspace dir: %w", err)
-	}
-	if err := os.MkdirAll(c.cfg.WorkDir, 0o755); err != nil {
-		return model.ResetResponse{}, fmt.Errorf("create work dir: %w", err)
-	}
-	if err := os.MkdirAll(c.cfg.WorkspaceDir, 0o755); err != nil {
-		return model.ResetResponse{}, fmt.Errorf("create workspace dir: %w", err)
+		return model.ResetResponse{}, fmt.Errorf("reset already in progress: %w", errConflict)
 	}
 
-	prevStates := make(map[string]model.RepoStateKind, len(c.cfg.Repos))
-	for _, repo := range c.cfg.Repos {
-		if rs, err := c.state.Get(repo.Name); err == nil {
-			prevStates[repo.Name] = rs.State
-		}
-	}
-
-	c.state.SetAll(model.StateInit)
-
-	if c.notifier != nil {
-		for _, repo := range c.cfg.Repos {
-			rs, err := c.state.Get(repo.Name)
-			if err != nil {
-				continue
-			}
-			if err := c.notifier.Enqueue(model.RepoChangedEvent{
-				EventKind:     model.EventKindRepoChanged,
-				Name:          repo.Name,
-				State:         rs.State,
-				PreviousState: prevStates[repo.Name],
-				Ref:           rs.Ref,
-			}); err != nil {
-				c.log.Warn("reset: failed to notify", "repo", repo.Name, "err", err)
-			}
-		}
+	for _, rs := range newStates {
+		c.notify(rs, prevKinds[rs.Name])
 	}
 
 	for _, repo := range c.cfg.Repos {
-		if err := c.engine.Enqueue(model.InitCommand{Name: repo.Name}); err != nil {
+		err := c.workers[repo.Name].Enqueue(model.ResetCommand{Name: repo.Name})
+		if err != nil {
+			c.log.Error("reset: failed to enqueue reset", "repo", repo.Name, "err", err)
+		}
+		err = c.workers[repo.Name].Enqueue(model.InitCommand{Name: repo.Name})
+		if err != nil {
 			c.log.Error("reset: failed to enqueue init", "repo", repo.Name, "err", err)
 		}
 	}
-	return model.ResetResponse{Success: true}, nil
+
+	return model.ResetResponse{Repos: newStates}, nil
 }

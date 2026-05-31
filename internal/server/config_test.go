@@ -49,11 +49,12 @@ func writeRuntimeDir(t *testing.T, repos []model.RepoConfig) string {
 
 func TestLoadConfig(t *testing.T) {
 	validRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git"}
+	validRepoWithDefaults := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git", CommandQueueSize: 16}
 	defaultConfig := Config{
 		Port:         "9001",
 		WorkDir:      "/tmp/gitops",
 		WorkspaceDir: "/config/.gitops",
-		Repos:        []model.RepoConfig{validRepo},
+		Repos:        []model.RepoConfig{validRepoWithDefaults},
 	}
 
 	testCases := []struct {
@@ -83,8 +84,8 @@ func TestLoadConfig(t *testing.T) {
 				Port:         "9001",
 				WorkDir:      "/tmp/custom",
 				WorkspaceDir: "/config/.gitops",
-				Repos:        []model.RepoConfig{validRepo},
-				Notification: &model.NotificationConfig{Type: "ha-webhook", URL: "http://ha.local/webhook", MaxBatchSize: 16, BatchInterval: model.Duration(3 * time.Second)},
+				Repos:        []model.RepoConfig{validRepoWithDefaults},
+				Notification: &model.NotificationConfig{Type: "ha-webhook", URL: "http://ha.local/webhook", QueueSize: 64, MaxBatchSize: 16, BatchInterval: model.Duration(3 * time.Second)},
 			},
 		},
 		{

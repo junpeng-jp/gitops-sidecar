@@ -5,10 +5,11 @@ import "time"
 type RepoStateKind string
 
 const (
-	StateInit    RepoStateKind = "init"
-	StateSyncing RepoStateKind = "syncing"
-	StateReady   RepoStateKind = "ready"
-	StateError   RepoStateKind = "error"
+	StateInit      RepoStateKind = "init"
+	StateSyncing   RepoStateKind = "syncing"
+	StateReady     RepoStateKind = "ready"
+	StateError     RepoStateKind = "error"
+	StateResetting RepoStateKind = "resetting"
 )
 
 type RepoState struct {

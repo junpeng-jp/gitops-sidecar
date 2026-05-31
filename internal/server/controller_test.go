@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,10 +13,11 @@ import (
 	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
 	"github.com/junpeng-jp/gitops-sidecar/internal/testutils/mocks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-func newTestGitOpsController(t *testing.T, repos []model.RepoConfig) (*GitOpsController, *Config, *storage.StateStore, *Worker) {
+func newTestGitOpsController(t *testing.T, repos []model.RepoConfig) (*GitOpsController, *Config, *storage.StateStore, map[string]*Worker, map[string]*mocks.MockGitClient) {
 	t.Helper()
 	cfg := &Config{
 		WorkDir:      t.TempDir(),
@@ -24,13 +26,19 @@ func newTestGitOpsController(t *testing.T, repos []model.RepoConfig) (*GitOpsCon
 	}
 	state := &storage.StateStore{}
 	state.Init(repos, cfg.WorkspaceDir)
-	git := &mocks.MockGitClient{}
-	engine := NewWorker(cfg, state, git, nil, slog.Default())
-	engine.enqueueTimeout = 50 * time.Millisecond
-	c := &GitOpsController{cfg: cfg, state: state, engine: engine, log: slog.Default()}
-	return c, cfg, state, engine
+	workers := make(map[string]*Worker, len(repos))
+	gits := make(map[string]*mocks.MockGitClient, len(repos))
+	for _, repo := range repos {
+		git := &mocks.MockGitClient{}
+		cmdCh := make(chan model.Command, 16)
+		w := NewWorker(cfg, repo, cmdCh, state, git, nil, slog.Default())
+		w.enqueueTimeout = 50 * time.Millisecond
+		workers[repo.Name] = w
+		gits[repo.Name] = git
+	}
+	c := &GitOpsController{cfg: cfg, state: state, workers: workers, log: slog.Default()}
+	return c, cfg, state, workers, gits
 }
-
 
 func TestGetRepos(t *testing.T) {
 	t.Parallel()
@@ -54,7 +62,7 @@ func TestGetRepos(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _, _, _ := newTestGitOpsController(t, repos)
+			c, _, _, _, _ := newTestGitOpsController(t, repos)
 			resp, err := c.GetRepos(tc.ctx, tc.request)
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
@@ -97,7 +105,7 @@ func TestGetRepo(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _, _, _ := newTestGitOpsController(t, repos)
+			c, _, _, _, _ := newTestGitOpsController(t, repos)
 			resp, err := c.GetRepo(tc.ctx, tc.request)
 			if tc.expectedErr != nil {
 				require.ErrorIs(t, err, tc.expectedErr)
@@ -174,6 +182,21 @@ func TestRepoOperation(t *testing.T) {
 			expectedErr: errConflict,
 		},
 		{
+			name: "error path: conflict when repo state is resetting",
+			ctx:  context.Background(),
+			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
+				t.Helper()
+				rs, err := s.Get("r")
+				require.NoError(t, err)
+				rs.State = model.StateResetting
+				s.Set("r", rs)
+				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
+			},
+			repoConfig:  defaultRepoConfig,
+			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			expectedErr: errConflict,
+		},
+		{
 			name: "error path: conflict when bare dir missing",
 			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
@@ -208,7 +231,7 @@ func TestRepoOperation(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, cfg, state, engine := newTestGitOpsController(t, tc.repoConfig)
+			c, cfg, state, workers, _ := newTestGitOpsController(t, tc.repoConfig)
 			if tc.setup != nil {
 				tc.setup(t, cfg, state)
 			}
@@ -222,8 +245,9 @@ func TestRepoOperation(t *testing.T) {
 			require.NoError(t, err)
 			resp.Repo.Path = ""
 			assert.Equal(t, tc.expectedResponse, resp)
+			w := workers[tc.request.Name]
 			select {
-			case cmd := <-engine.cmdCh:
+			case cmd := <-w.cmdCh:
 				pull, ok := cmd.(model.PullCommand)
 				require.True(t, ok, "expected PullCommand in channel")
 				assert.Equal(t, tc.request.Name, pull.Name)
@@ -237,59 +261,82 @@ func TestRepoOperation(t *testing.T) {
 
 func TestReset(t *testing.T) {
 	t.Parallel()
-	defaultRepoConfig := []model.RepoConfig{
+	repos := []model.RepoConfig{
 		{Name: "r1", URL: "url1"},
 		{Name: "r2", URL: "url2"},
 	}
 
-	testCases := []struct {
-		name             string
-		ctx              context.Context
-		repoConfig       []model.RepoConfig
-		expectedErr      error
-		expectedResponse model.ResetResponse
-	}{
-		{
-			name:             "happy path: wipes dirs and re-enqueues init commands",
-			ctx:              context.Background(),
-			repoConfig:       defaultRepoConfig,
-			expectedResponse: model.ResetResponse{Success: true},
-		},
-	}
+	t.Run("happy path: locks repos to resetting, wipes dirs, re-enqueues init", func(t *testing.T) {
+		t.Parallel()
+		c, cfg, state, workers, gits := newTestGitOpsController(t, repos)
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			c, cfg, state, engine := newTestGitOpsController(t, tc.repoConfig)
+		// Block post-reset init so we can observe StateInit before it transitions to ready.
+		ctx, cancel := context.WithCancel(context.Background())
+		for _, repo := range repos {
+			git := gits[repo.Name]
+			git.On("BareClone", mock.Anything, repo.URL, mock.Anything).
+				Run(func(mock.Arguments) { <-ctx.Done() }).
+				Return(context.Canceled)
+		}
 
-			sentinel := filepath.Join(cfg.WorkDir, "sentinel.txt")
-			require.NoError(t, os.WriteFile(sentinel, []byte("data"), 0o644))
+		var wg sync.WaitGroup
+		for _, w := range workers {
+			wg.Add(1)
+			go func(w *Worker) { defer wg.Done(); w.Run(ctx) }(w)
+		}
+		t.Cleanup(func() { cancel(); wg.Wait() })
 
-			resp, err := c.Reset(tc.ctx)
+		// Create per-repo sentinel files that should be removed by reset.
+		for _, repo := range repos {
+			dir := filepath.Join(cfg.WorkDir, repo.Name)
+			require.NoError(t, os.MkdirAll(dir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "sentinel.txt"), []byte("data"), 0o644))
+		}
 
-			if tc.expectedErr != nil {
-				require.ErrorIs(t, err, tc.expectedErr)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tc.expectedResponse, resp)
-			assert.NoFileExists(t, sentinel)
-			assert.DirExists(t, cfg.WorkDir)
-			assert.DirExists(t, cfg.WorkspaceDir)
-			for _, repo := range tc.repoConfig {
+		resp, err := c.Reset(context.Background())
+		require.NoError(t, err)
+
+		// Response must contain all repos in StateResetting.
+		require.Len(t, resp.Repos, len(repos))
+		for _, rs := range resp.Repos {
+			assert.Equal(t, model.StateResetting, rs.State)
+		}
+
+		// Root dirs must survive.
+		assert.DirExists(t, cfg.WorkDir)
+		assert.DirExists(t, cfg.WorkspaceDir)
+
+		// Wait for workers to drain the ResetCommand; state must reach StateInit
+		// (init is blocked on ctx so it cannot progress further).
+		require.Eventually(t, func() bool {
+			for _, repo := range repos {
 				rs, err := state.Get(repo.Name)
-				require.NoError(t, err)
-				assert.Equal(t, model.StateInit, rs.State)
+				if err != nil || rs.State != model.StateInit {
+					return false
+				}
 			}
-			var initCmds []model.Command
-			for len(engine.cmdCh) > 0 {
-				initCmds = append(initCmds, <-engine.cmdCh)
-			}
-			require.Len(t, initCmds, len(tc.repoConfig))
-			for _, cmd := range initCmds {
-				_, ok := cmd.(model.InitCommand)
-				assert.True(t, ok, "expected InitCommand")
-			}
-		})
-	}
+			return true
+		}, 5*time.Second, 10*time.Millisecond)
+
+		// Per-repo work dirs must be gone.
+		for _, repo := range repos {
+			assert.NoDirExists(t, filepath.Join(cfg.WorkDir, repo.Name))
+		}
+	})
+
+	t.Run("error path: conflict when reset already in progress", func(t *testing.T) {
+		t.Parallel()
+		c, _, state, _, _ := newTestGitOpsController(t, repos)
+
+		// Manually put all repos into StateResetting to simulate an in-flight reset.
+		for _, repo := range repos {
+			rs, err := state.Get(repo.Name)
+			require.NoError(t, err)
+			rs.State = model.StateResetting
+			state.Set(repo.Name, rs)
+		}
+
+		_, err := c.Reset(context.Background())
+		require.ErrorIs(t, err, errConflict)
+	})
 }

@@ -30,5 +30,5 @@ type RepoOperationResponse struct {
 }
 
 type ResetResponse struct {
-	Success bool `json:"success"`
+	Repos []RepoState `json:"repos"`
 }

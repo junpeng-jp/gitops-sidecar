@@ -19,9 +19,9 @@ type GitOpsServer struct {
 	log        *slog.Logger
 }
 
-func NewServer(cfg *Config, state *storage.StateStore, engine *Worker, notifier *NotificationWorker, log *slog.Logger, version, commit, date string) *GitOpsServer {
+func NewServer(cfg *Config, state *storage.StateStore, workers map[string]*Worker, notifier *NotificationWorker, log *slog.Logger, version, commit, date string) *GitOpsServer {
 	s := &GitOpsServer{
-		controller: &GitOpsController{cfg: cfg, state: state, engine: engine, notifier: notifier, log: log, version: version, commit: commit, date: date},
+		controller: &GitOpsController{cfg: cfg, state: state, workers: workers, notifier: notifier, log: log, version: version, commit: commit, date: date},
 		log:        log,
 	}
 

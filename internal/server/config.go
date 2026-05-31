@@ -29,11 +29,13 @@ var (
 )
 
 const (
-	defaultWorkDir       = "/tmp/gitops"
-	defaultConfigFile    = "/etc/gitops/config.json"
-	defaultPort          = "9001"
-	defaultMaxBatchSize  = 16
-	defaultBatchInterval = 3 * time.Second
+	defaultWorkDir              = "/tmp/gitops"
+	defaultConfigFile           = "/etc/gitops/config.json"
+	defaultPort                 = "9001"
+	defaultCommandQueueSize     = 16
+	defaultNotificationQueueSize = 64
+	defaultMaxBatchSize         = 16
+	defaultBatchInterval        = 3 * time.Second
 )
 
 var repoNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -75,9 +77,12 @@ func LoadConfig() (*Config, error) {
 	if len(cfg.Repos) == 0 {
 		return nil, fmt.Errorf("config: %w", errNoRepos)
 	}
-	for _, r := range cfg.Repos {
+	for i, r := range cfg.Repos {
 		if err := validateRepoConfig(r); err != nil {
 			return nil, err
+		}
+		if cfg.Repos[i].CommandQueueSize == 0 {
+			cfg.Repos[i].CommandQueueSize = defaultCommandQueueSize
 		}
 	}
 	if cfg.Notification != nil {
@@ -86,6 +91,9 @@ func LoadConfig() (*Config, error) {
 		}
 		if cfg.Notification.URL == "" {
 			return nil, fmt.Errorf("config: %w", errMissingNotificationURL)
+		}
+		if cfg.Notification.QueueSize == 0 {
+			cfg.Notification.QueueSize = defaultNotificationQueueSize
 		}
 		if cfg.Notification.MaxBatchSize < 0 {
 			return nil, fmt.Errorf("config: %w", errInvalidMaxBatchSize)

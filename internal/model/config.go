@@ -26,14 +26,16 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 }
 
 type RepoConfig struct {
-	Name         string `json:"name"`
-	URL          string `json:"url"`
-	VerifyCommit bool   `json:"verifyCommit"`
+	Name             string `json:"name"`
+	URL              string `json:"url"`
+	VerifyCommit     bool   `json:"verifyCommit"`
+	CommandQueueSize int    `json:"commandQueueSize"`
 }
 
 type NotificationConfig struct {
 	Type          string   `json:"type"`
 	URL           string   `json:"url"`
+	QueueSize     int      `json:"queueSize"`
 	MaxBatchSize  int      `json:"maxBatchSize"`
 	BatchInterval Duration `json:"batchInterval"`
 }
