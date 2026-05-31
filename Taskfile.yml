@@ -1,0 +1,98 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  VERSION:
+    sh: git describe --tags --abbrev=0 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "dev"
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  LDFLAGS: >-
+    -s -w
+    -X main.version={{.VERSION}}
+    -X main.commit={{.COMMIT}}
+    -X main.date={{.DATE}}
+  COVERPKGS:
+    sh: go list ./... | grep -v "/internal/testutils" | tr '\n' ',' | sed 's/,$//'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf dist/
+
+  build:
+    desc: Build the Go binary for the current platform
+    deps: [clean]
+    vars:
+      GOOS:
+        sh: go env GOOS
+      GOARCH:
+        sh: go env GOARCH
+    cmds:
+      - mkdir -p dist
+      - CGO_ENABLED=0 GOOS={{.GOOS}} GOARCH={{.GOARCH}} go build -trimpath -ldflags="{{.LDFLAGS}}" -o dist/gitops_sidecar_{{.VERSION}}_{{.GOOS}}_{{.GOARCH}} .
+      - cmd: cd dist && sha256sum gitops_sidecar_{{.VERSION}}_{{.GOOS}}_{{.GOARCH}} > checksums.txt
+        platforms: [linux]
+      - cmd: cd dist && shasum -a 256 gitops_sidecar_{{.VERSION}}_{{.GOOS}}_{{.GOARCH}} > checksums.txt
+        platforms: [darwin]
+
+  build:all:
+    desc: Cross-compile for all supported platforms
+    deps: [clean]
+    cmds:
+      - mkdir -p dist
+      - for:
+          - {GOOS: linux, GOARCH: amd64}
+          - {GOOS: linux, GOARCH: arm64}
+          - {GOOS: darwin, GOARCH: amd64}
+          - {GOOS: darwin, GOARCH: arm64}
+        cmd: CGO_ENABLED=0 GOOS={{.ITEM.GOOS}} GOARCH={{.ITEM.GOARCH}} go build -trimpath -ldflags="{{.LDFLAGS}}" -o dist/gitops_sidecar_{{.VERSION}}_{{.ITEM.GOOS}}_{{.ITEM.GOARCH}} .
+      - cmd: cd dist && sha256sum gitops_sidecar_{{.VERSION}}_* > checksums.txt
+        platforms: [linux]
+      - cmd: cd dist && shasum -a 256 gitops_sidecar_{{.VERSION}}_* > checksums.txt
+        platforms: [darwin]
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run --modules-download-mode=vendor ./...
+
+  check:
+    desc: Run lint and tests
+    cmds:
+      - task: lint
+      - task: test
+
+  test:cover:
+    desc: Run tests with coverage profile (coverage.out) and print overall coverage
+    cmds:
+      - cmd: go test -coverprofile=coverage.out -coverpkg={{.COVERPKGS}} ./...
+        ignore_error: true
+      - go tool cover -func=coverage.out | tail -1
+
+  test:cover:cobertura:
+    desc: Generate Cobertura XML (coverage.xml) from coverage.out
+    deps: [test:cover]
+    cmds:
+      - go tool gocover-cobertura < coverage.out > coverage.xml
+
+  test:cover:html:
+    desc: Generate HTML coverage report (coverage.html) from coverage.out
+    deps: [test:cover]
+    cmds:
+      - go tool cover -html=coverage.out -o coverage.html
+      - open coverage.html

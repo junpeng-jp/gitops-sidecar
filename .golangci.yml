@@ -1,0 +1,55 @@
+version: "2"
+
+issues:
+  max-same-issues: 3
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+    - golines
+  settings:
+    gofmt:
+      rewrite-rules:
+        - pattern: 'interface{}'
+          replacement: 'any'
+    goimports:
+      local-prefixes:
+        - github.com/junpeng-jp/kaki
+    golines:
+      max-len: 120
+      shorten-comments: true
+      chain-split-dots: true
+
+linters:
+  default: all
+  disable:
+    - exhaustruct
+    - varnamelen
+    - wrapcheck
+    - wsl
+    - wsl_v5
+    - testpackage
+    - revive
+
+  exclusions:
+    rules:
+    - text: 'should have a package comment'
+      linters: [ revive ]
+    - path: '_test\.go'
+      linters:
+        - errcheck
+        - funlen
+  
+  settings:
+    cyclop:
+      max-complexity: 30
+      package-average: 10
+    depguard:
+      rules:
+        deprecated:
+          files:
+            - "$all"
+          deny:
+            - pkg: github.com/golang/protobuf
+              desc: Use google.golang.org/protobuf instead, see https://developers.google.com/protocol-buffers/docs/reference/go/faq#modules
