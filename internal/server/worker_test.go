@@ -80,11 +80,11 @@ func TestWorker_HandleInit(t *testing.T) {
 
 			engine.handleInit(context.Background(), tc.targetName)
 
-			rs, ok := state.Get(tc.checkRepoName)
-			require.True(t, ok)
+			rs, err := state.Get(tc.checkRepoName)
+			require.NoError(t, err)
 			assert.Equal(t, tc.expectedState, rs.State)
 			if tc.expectedErr != nil {
-				assert.Equal(t, tc.expectedErr.Error(), rs.Error)
+				assert.Contains(t, rs.Error, tc.expectedErr.Error())
 			} else {
 				assert.Empty(t, rs.Error)
 			}
@@ -214,11 +214,11 @@ func TestWorker_HandlePull(t *testing.T) {
 
 			engine.handlePull(context.Background(), model.PullCommand{Name: tc.targetName, Ref: "main"})
 
-			rs, ok := state.Get(tc.checkRepoName)
-			require.True(t, ok)
+			rs, err := state.Get(tc.checkRepoName)
+			require.NoError(t, err)
 			assert.Equal(t, tc.expectedState, rs.State)
 			if tc.expectedErr != nil {
-				assert.Equal(t, tc.expectedErr.Error(), rs.Error)
+				assert.Contains(t, rs.Error, tc.expectedErr.Error())
 			} else {
 				assert.Empty(t, rs.Error)
 			}
@@ -349,7 +349,8 @@ func TestWorker_Run(t *testing.T) {
 			tc.enqueue(engine)
 
 			require.Eventually(t, func() bool {
-				rs, _ := state.Get("r")
+				rs, err := state.Get("r")
+				require.NoError(t, err)
 				return rs.State == tc.expectedState
 			}, 5*time.Second, 10*time.Millisecond)
 

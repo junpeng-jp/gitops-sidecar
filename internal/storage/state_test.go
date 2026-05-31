@@ -57,8 +57,8 @@ func TestStateStore_Init(t *testing.T) {
 			var s StateStore
 			s.Init(tc.repos, tc.workspaceDir)
 			for name, expected := range tc.expectedInit {
-				got, ok := s.Get(name)
-				require.True(t, ok, "repo %q not found", name)
+				got, err := s.Get(name)
+				require.NoError(t, err, "repo %q not found", name)
 				assert.Equal(t, expected.Name, got.Name)
 				assert.Equal(t, expected.State, got.State)
 				assert.Equal(t, expected.Ref, got.Ref)
@@ -78,30 +78,31 @@ func TestStateStore_Get(t *testing.T) {
 	testCases := []struct {
 		name          string
 		lookupName    string
-		expectFound   bool
+		expectErr     error
 		expectedState model.RepoStateKind
 	}{
 		{
 			name:          "known name",
 			lookupName:    haConfig,
-			expectFound:   true,
 			expectedState: model.StateInit,
 		},
 		{
-			name:        "unknown name",
-			lookupName:  "does-not-exist",
-			expectFound: false,
+			name:       "unknown name",
+			lookupName: "does-not-exist",
+			expectErr:  ErrRepoNotFound,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rs, ok := s.Get(tc.lookupName)
-			assert.Equal(t, tc.expectFound, ok)
-			if tc.expectFound {
-				assert.Equal(t, tc.expectedState, rs.State)
+			rs, err := s.Get(tc.lookupName)
+			if tc.expectErr != nil {
+				require.ErrorIs(t, err, tc.expectErr)
+				return
 			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.expectedState, rs.State)
 		})
 	}
 }
@@ -153,8 +154,8 @@ func TestStateStore_SetAndGet(t *testing.T) {
 			var s StateStore
 			s.Init([]model.RepoConfig{{Name: haConfig, URL: dummyURL}}, wsPath)
 			s.Set(haConfig, tc.setState)
-			got, ok := s.Get(haConfig)
-			require.True(t, ok)
+			got, err := s.Get(haConfig)
+			require.NoError(t, err)
 			assert.Equal(t, tc.expectedState.State, got.State)
 			assert.Equal(t, tc.expectedState.Ref, got.Ref)
 			assert.Equal(t, tc.expectedState.Path, got.Path)

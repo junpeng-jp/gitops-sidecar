@@ -93,11 +93,7 @@ func (s *GitOpsServer) handleRepoOperation(w http.ResponseWriter, r *http.Reques
 
 func (s *GitOpsServer) handleReset(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.controller.Reset(r.Context())
-	if err != nil {
-		s.writeJSON(w, errorStatus(err), map[string]any{"error": map[string]string{"message": err.Error()}})
-		return
-	}
-	s.writeJSON(w, http.StatusAccepted, resp)
+	s.writeResponse(w, http.StatusAccepted, resp, err)
 }
 
 func (s *GitOpsServer) writeResponse(w http.ResponseWriter, successStatus int, v any, err error) {

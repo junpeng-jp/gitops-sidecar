@@ -13,9 +13,9 @@ import (
 )
 
 var (
+	errBadRequest = errors.New("http 400: bad request")
 	errNotFound   = errors.New("http 404: not found")
 	errConflict   = errors.New("http 409: conflict")
-	errBadRequest = errors.New("http 500: bad request")
 )
 
 type GitOpsController struct {
@@ -33,38 +33,33 @@ func (c *GitOpsController) Health(_ context.Context) (model.HealthResponse, erro
 	return model.HealthResponse{Status: "ok", Version: c.version, Commit: c.commit, Date: c.date}, nil
 }
 
-func (c *GitOpsController) GetRepos(ctx context.Context, req model.GetReposRequest) (model.GetReposResponse, error) {
-	if err := ctx.Err(); err != nil {
-		return model.GetReposResponse{}, err
-	}
-	return model.GetReposResponse{Repos: c.state.List(req.Limit)}, nil
+func (c *GitOpsController) GetRepos(_ context.Context, req model.GetReposRequest) (model.GetReposResponse, error) {
+	return model.GetReposResponse{
+		Repos: c.state.List(req.Limit),
+	}, nil
 }
 
-func (c *GitOpsController) GetRepo(ctx context.Context, req model.GetRepoRequest) (model.GetRepoResponse, error) {
-	if err := ctx.Err(); err != nil {
-		return model.GetRepoResponse{}, err
-	}
-	rs, ok := c.state.Get(req.Name)
-	if !ok {
+func (c *GitOpsController) GetRepo(_ context.Context, req model.GetRepoRequest) (model.GetRepoResponse, error) {
+	rs, err := c.state.Get(req.Name)
+	if err != nil {
 		return model.GetRepoResponse{}, fmt.Errorf("repo not found: %s: %w", req.Name, errNotFound)
 	}
 	return model.GetRepoResponse{Repo: rs}, nil
 }
 
-func (c *GitOpsController) RepoOperation(ctx context.Context, req model.RepoOperationRequest) (model.RepoOperationResponse, error) {
-	if err := ctx.Err(); err != nil {
-		return model.RepoOperationResponse{}, err
-	}
-	rs, ok := c.state.Get(req.Name)
-	if !ok {
+func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperationRequest) (model.RepoOperationResponse, error) {
+	rs, err := c.state.Get(req.Name)
+	if err != nil {
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not found: %s: %w", req.Name, errNotFound)
 	}
 	if rs.State == model.StateInit {
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not initialised: %s: %w", req.Name, errConflict)
 	}
 	bareDir := filepath.Join(c.cfg.WorkDir, req.Name, ".bare")
-	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
+	if _, err := os.Stat(bareDir); errors.Is(err, os.ErrNotExist) {
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not initialised: %s: %w", req.Name, errConflict)
+	} else if err != nil {
+		return model.RepoOperationResponse{}, fmt.Errorf("stat bare dir %s: %w", bareDir, err)
 	}
 
 	switch req.Body.Kind {
@@ -73,39 +68,33 @@ func (c *GitOpsController) RepoOperation(ctx context.Context, req model.RepoOper
 			return model.RepoOperationResponse{}, fmt.Errorf("ref is required for pull: %w", errBadRequest)
 		}
 		c.engine.Enqueue(model.PullCommand{Name: req.Name, Ref: req.Body.Ref})
-		rs, _ = c.state.Get(req.Name)
+		rs, err = c.state.Get(req.Name)
+		if err != nil {
+			return model.RepoOperationResponse{}, fmt.Errorf("get repo after enqueue: %w", err)
+		}
 		return model.RepoOperationResponse{Repo: rs}, nil
 	default:
 		return model.RepoOperationResponse{}, fmt.Errorf("unknown operation kind %q: %w", req.Body.Kind, errBadRequest)
 	}
 }
 
-func (c *GitOpsController) Reset(ctx context.Context) (model.ResetResponse, error) {
-	if err := ctx.Err(); err != nil {
-		return model.ResetResponse{}, err
-	}
+func (c *GitOpsController) Reset(_ context.Context) (model.ResetResponse, error) {
 	if err := os.RemoveAll(c.cfg.WorkDir); err != nil {
-		return model.ResetResponse{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return model.ResetResponse{}, err
+		return model.ResetResponse{}, fmt.Errorf("remove work dir: %w", err)
 	}
 	if err := os.RemoveAll(c.cfg.WorkspaceDir); err != nil {
-		return model.ResetResponse{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return model.ResetResponse{}, err
+		return model.ResetResponse{}, fmt.Errorf("remove workspace dir: %w", err)
 	}
 	if err := os.MkdirAll(c.cfg.WorkDir, 0o755); err != nil {
-		return model.ResetResponse{}, err
+		return model.ResetResponse{}, fmt.Errorf("create work dir: %w", err)
 	}
 	if err := os.MkdirAll(c.cfg.WorkspaceDir, 0o755); err != nil {
-		return model.ResetResponse{}, err
+		return model.ResetResponse{}, fmt.Errorf("create workspace dir: %w", err)
 	}
 
 	prevStates := make(map[string]model.RepoStateKind, len(c.cfg.Repos))
 	for _, repo := range c.cfg.Repos {
-		if rs, ok := c.state.Get(repo.Name); ok {
+		if rs, err := c.state.Get(repo.Name); err == nil {
 			prevStates[repo.Name] = rs.State
 		}
 	}
@@ -114,7 +103,10 @@ func (c *GitOpsController) Reset(ctx context.Context) (model.ResetResponse, erro
 
 	if c.notifier != nil {
 		for _, repo := range c.cfg.Repos {
-			rs, _ := c.state.Get(repo.Name)
+			rs, err := c.state.Get(repo.Name)
+			if err != nil {
+				continue
+			}
 			c.notifier.Enqueue(model.RepoChangedEvent{
 				EventKind:     model.EventKindRepoChanged,
 				Name:          repo.Name,

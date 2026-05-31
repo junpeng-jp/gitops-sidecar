@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -19,6 +20,7 @@ var (
 	errFetchFailed  = errors.New("fetch error")
 	errPruneFailed  = errors.New("prune error")
 	errAddFailed    = errors.New("add error")
+	errSwapFailed   = errors.New("swap failed")
 	errBadSignature = errors.New("bad signature")
 )
 
@@ -78,35 +80,35 @@ func (e *Worker) handleInit(ctx context.Context, name string) {
 
 	bareDir := filepath.Join(e.cfg.WorkDir, name, ".bare")
 	if err := e.git.BareClone(ctx, repo.URL, bareDir); err != nil {
-		rs, prev := e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev := e.transition(name, model.StateError, fmt.Errorf("%w: %w", errCloneFailed, err))
+		e.notify(name, repoState, prev)
 		return
 	}
 
-	rs, prev := e.transition(name, model.StateReady, "")
-	e.notify(name, rs, prev)
+	repoState, prev := e.transition(name, model.StateReady, nil)
+	e.notify(name, repoState, prev)
 }
 
 func (e *Worker) handlePull(ctx context.Context, cmd model.PullCommand) {
 	name := cmd.Name
 	log := e.log.With("repo", name, "ref", cmd.Ref)
 
-	_, ok := e.repoConfig(name)
+	repo, ok := e.repoConfig(name)
 	if !ok {
 		log.Error("pull: unknown repo")
 		return
 	}
 
-	rs, prev := e.transition(name, model.StateSyncing, "")
-	e.notify(name, rs, prev)
+	repoState, prev := e.transition(name, model.StateSyncing, nil)
+	e.notify(name, repoState, prev)
 
 	bareDir := filepath.Join(e.cfg.WorkDir, name, ".bare")
 	worktreeDir := filepath.Join(e.cfg.WorkspaceDir, name)
 	tmpDir := worktreeDir + ".new"
 
 	if err := e.git.Fetch(ctx, bareDir); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = e.transition(name, model.StateError, fmt.Errorf("%w: %w", errFetchFailed, err))
+		e.notify(name, repoState, prev)
 		return
 	}
 
@@ -115,24 +117,23 @@ func (e *Worker) handlePull(ctx context.Context, cmd model.PullCommand) {
 	}
 
 	if err := e.git.WorktreePrune(ctx, bareDir); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = e.transition(name, model.StateError, fmt.Errorf("%w: %w", errPruneFailed, err))
+		e.notify(name, repoState, prev)
 		return
 	}
 
 	if err := os.MkdirAll(filepath.Dir(tmpDir), 0o755); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = e.transition(name, model.StateError, fmt.Errorf("mkdir %s: %w", filepath.Dir(tmpDir), err))
+		e.notify(name, repoState, prev)
 		return
 	}
 
 	if err := e.git.WorktreeAdd(ctx, bareDir, tmpDir, cmd.Ref); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = e.transition(name, model.StateError, fmt.Errorf("%w: %w", errAddFailed, err))
+		e.notify(name, repoState, prev)
 		return
 	}
 
-	repo, _ := e.repoConfig(name)
 	if repo.VerifyCommit {
 		if err := e.git.VerifyCommit(ctx, tmpDir); err != nil {
 			if cleanErr := os.RemoveAll(tmpDir); cleanErr != nil {
@@ -141,27 +142,26 @@ func (e *Worker) handlePull(ctx context.Context, cmd model.PullCommand) {
 			if pruneErr := e.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
 				log.Warn("prune after verify failure", "err", pruneErr)
 			}
-			rs, prev = e.transition(name, model.StateError, err.Error())
-			e.notify(name, rs, prev)
+			repoState, prev = e.transition(name, model.StateError, fmt.Errorf("%w: %w", errBadSignature, err))
+			e.notify(name, repoState, prev)
 			return
 		}
 	}
 
-	// Atomic swap: move old content aside then move new content into place.
-	// Both renames are within the same directory so each is a single syscall.
 	oldDir := worktreeDir + ".old"
 	if err := os.RemoveAll(oldDir); err != nil {
 		log.Warn("cleanup leftover oldDir", "err", err)
 	}
-	if err := os.Rename(worktreeDir, oldDir); err != nil && !os.IsNotExist(err) {
+	// os.ErrNotExist is success: no previous worktree on first pull
+	if err := os.Rename(worktreeDir, oldDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		if cleanErr := os.RemoveAll(tmpDir); cleanErr != nil {
 			log.Warn("cleanup tmpDir after rename-to-old failure", "err", cleanErr)
 		}
 		if pruneErr := e.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
 			log.Warn("prune after rename-to-old failure", "err", pruneErr)
 		}
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = e.transition(name, model.StateError, fmt.Errorf("%w: %w", errSwapFailed, err))
+		e.notify(name, repoState, prev)
 		return
 	}
 	if err := os.Rename(tmpDir, worktreeDir); err != nil {
@@ -174,8 +174,8 @@ func (e *Worker) handlePull(ctx context.Context, cmd model.PullCommand) {
 		if pruneErr := e.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
 			log.Warn("prune after rename-to-new failure", "err", pruneErr)
 		}
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = e.transition(name, model.StateError, err)
+		e.notify(name, repoState, prev)
 		return
 	}
 	if err := os.RemoveAll(oldDir); err != nil {
@@ -185,31 +185,43 @@ func (e *Worker) handlePull(ctx context.Context, cmd model.PullCommand) {
 		log.Warn("prune after successful swap", "err", err)
 	}
 
-	rs, prev = e.transition(name, model.StateReady, "")
+	// Pre-set Ref so the transition write captures the correct value atomically.
+	rs, err := e.state.Get(name)
+	if err != nil {
+		log.Error("handlePull: repo missing from state store before ready transition")
+		return
+	}
 	rs.Ref = cmd.Ref
 	e.state.Set(name, rs)
-	e.notify(name, rs, prev)
+	repoState, prev = e.transition(name, model.StateReady, nil)
+	e.notify(name, repoState, prev)
 }
 
-func (e *Worker) transition(name string, kind model.RepoStateKind, errMsg string) (model.RepoState, model.RepoStateKind) {
-	rs, _ := e.state.Get(name)
-	prev := rs.State
-	rs.State = kind
+func (e *Worker) transition(name string, kind model.RepoStateKind, err error) (model.RepoState, model.RepoStateKind) {
+	repoState, getErr := e.state.Get(name)
+	if getErr != nil {
+		e.log.Error("transition: repo missing from state store", "repo", name)
+		return model.RepoState{Name: name}, ""
+	}
+	prev := repoState.State
+	repoState.State = kind
 	switch kind {
 	case model.StateInit:
-		rs.Error = ""
-		rs.LastUpdatedAt = nil
+		repoState.Error = ""
+		repoState.LastUpdatedAt = nil
 	case model.StateSyncing:
-		rs.Error = ""
+		repoState.Error = ""
 	case model.StateReady:
 		now := time.Now()
-		rs.Error = ""
-		rs.LastUpdatedAt = &now
+		repoState.Error = ""
+		repoState.LastUpdatedAt = &now
 	case model.StateError:
-		rs.Error = errMsg
+		if err != nil {
+			repoState.Error = err.Error()
+		}
 	}
-	e.state.Set(name, rs)
-	return rs, prev
+	e.state.Set(name, repoState)
+	return repoState, prev
 }
 
 func (e *Worker) notify(name string, state model.RepoState, prev model.RepoStateKind) {
