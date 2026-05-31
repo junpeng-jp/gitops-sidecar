@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
@@ -113,23 +115,45 @@ func LoadConfig() (*Config, error) {
 	return cfg, nil
 }
 
+func isSSHURL(url string) bool {
+	return strings.HasPrefix(url, "git@") || strings.HasPrefix(url, "ssh://")
+}
+
 func validateSSHRuntime(runtimeDir string, repos []model.RepoConfig) error {
-	if _, err := os.Stat(runtimeDir); os.IsNotExist(err) {
+	if _, err := os.Stat(runtimeDir); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%w: %s", errRuntimeDirMissing, runtimeDir)
+	} else if err != nil {
+		return fmt.Errorf("stat runtimeDir %s: %w", runtimeDir, err)
 	}
 
-	for _, name := range []string{"gitconfig", "ssh_config", "known_hosts"} {
-		p := filepath.Join(runtimeDir, name)
-		if _, err := os.Stat(p); os.IsNotExist(err) {
+	// gitconfig is always required when a runtimeDir is configured.
+	if p := filepath.Join(runtimeDir, "gitconfig"); true {
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w: %s", errRuntimeFileMissing, p)
+		} else if err != nil {
+			return fmt.Errorf("stat %s: %w", p, err)
+		}
+	}
+
+	// ssh_config and known_hosts are only needed for SSH-protocol repos.
+	if slices.ContainsFunc(repos, func(r model.RepoConfig) bool { return isSSHURL(r.URL) }) {
+		for _, name := range []string{"ssh_config", "known_hosts"} {
+			p := filepath.Join(runtimeDir, name)
+			if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%w: %s", errRuntimeFileMissing, p)
+			} else if err != nil {
+				return fmt.Errorf("stat %s: %w", p, err)
+			}
 		}
 	}
 
 	for _, repo := range repos {
 		if repo.VerifyCommit {
 			p := filepath.Join(runtimeDir, "allowed-signers", repo.Name)
-			if _, err := os.Stat(p); os.IsNotExist(err) {
+			if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("%w: %s", errMissingAllowedSigners, p)
+			} else if err != nil {
+				return fmt.Errorf("stat allowed-signers %s: %w", p, err)
 			}
 		}
 	}

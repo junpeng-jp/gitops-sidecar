@@ -1,12 +1,16 @@
 package storage
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 )
+
+var ErrRepoNotFound = errors.New("repo not found")
 
 type StateStore struct {
 	mu    sync.RWMutex
@@ -26,11 +30,14 @@ func (s *StateStore) Init(repos []model.RepoConfig, workspaceDir string) {
 	}
 }
 
-func (s *StateStore) Get(name string) (model.RepoState, bool) {
+func (s *StateStore) Get(name string) (model.RepoState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rs, ok := s.repos[name]
-	return rs, ok
+	if !ok {
+		return model.RepoState{}, ErrRepoNotFound
+	}
+	return rs, nil
 }
 
 func (s *StateStore) Set(name string, rs model.RepoState) {
@@ -48,13 +55,7 @@ func (s *StateStore) List(limit int) []model.RepoState {
 		out = append(out, v)
 	}
 	slices.SortFunc(out, func(a, b model.RepoState) int {
-		if a.Name < b.Name {
-			return -1
-		}
-		if a.Name > b.Name {
-			return 1
-		}
-		return 0
+		return strings.Compare(a.Name, b.Name)
 	})
 	if limit < len(out) {
 		out = out[:limit]

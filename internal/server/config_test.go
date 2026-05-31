@@ -22,13 +22,20 @@ func writeConfigFile(t *testing.T, cfg any) string {
 	return path
 }
 
-// writeRuntimeDir creates a temp dir populated with all required SSH runtime files.
+// writeRuntimeDir creates a temp dir populated with the required runtime files.
+// ssh_config and known_hosts are only written when at least one repo uses an SSH URL.
 // Repos with VerifyCommit get a corresponding allowed-signers file.
 func writeRuntimeDir(t *testing.T, repos []model.RepoConfig) string {
 	t.Helper()
 	dir := t.TempDir()
-	for _, name := range []string{"gitconfig", "ssh_config", "known_hosts"} {
-		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(""), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "gitconfig"), []byte(""), 0600))
+	for _, r := range repos {
+		if isSSHURL(r.URL) {
+			for _, name := range []string{"ssh_config", "known_hosts"} {
+				require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(""), 0600))
+			}
+			break
+		}
 	}
 	for _, repo := range repos {
 		if repo.VerifyCommit {
@@ -194,7 +201,8 @@ func TestLoadConfig(t *testing.T) {
 
 func TestValidateSSHRuntime(t *testing.T) {
 	t.Parallel()
-	validRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git"}
+	sshRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git"}
+	httpsRepo := model.RepoConfig{Name: "ha-config", URL: "https://github.com/org/ha-config.git"}
 	verifyRepo := model.RepoConfig{Name: "ha-config", URL: "git@github.com:org/ha-config.git", VerifyCommit: true}
 
 	testCases := []struct {
@@ -204,12 +212,35 @@ func TestValidateSSHRuntime(t *testing.T) {
 		expectedErr error
 	}{
 		{
-			name: "valid runtime dir",
+			name: "valid runtime dir with SSH repo",
 			setup: func(t *testing.T) string {
 				t.Helper()
-				return writeRuntimeDir(t, []model.RepoConfig{validRepo})
+				return writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 			},
-			repos: []model.RepoConfig{validRepo},
+			repos: []model.RepoConfig{sshRepo},
+		},
+		{
+			name: "HTTPS repo: ssh_config and known_hosts not required",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				// Only gitconfig — no SSH files needed for HTTPS repos.
+				dir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "gitconfig"), []byte(""), 0600))
+				return dir
+			},
+			repos: []model.RepoConfig{httpsRepo},
+		},
+		{
+			name: "mixed repos: SSH file required when any repo uses SSH",
+			setup: func(t *testing.T) string {
+				t.Helper()
+				// Has gitconfig only — missing ssh_config/known_hosts.
+				dir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "gitconfig"), []byte(""), 0600))
+				return dir
+			},
+			repos:       []model.RepoConfig{httpsRepo, sshRepo},
+			expectedErr: errRuntimeFileMissing,
 		},
 		{
 			name: "runtimeDir does not exist",
@@ -217,47 +248,47 @@ func TestValidateSSHRuntime(t *testing.T) {
 				t.Helper()
 				return filepath.Join(t.TempDir(), "nonexistent")
 			},
-			repos:       []model.RepoConfig{validRepo},
+			repos:       []model.RepoConfig{sshRepo},
 			expectedErr: errRuntimeDirMissing,
 		},
 		{
 			name: "gitconfig missing",
 			setup: func(t *testing.T) string {
 				t.Helper()
-				dir := writeRuntimeDir(t, []model.RepoConfig{validRepo})
+				dir := writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "gitconfig")))
 				return dir
 			},
-			repos:       []model.RepoConfig{validRepo},
+			repos:       []model.RepoConfig{sshRepo},
 			expectedErr: errRuntimeFileMissing,
 		},
 		{
-			name: "ssh_config missing",
+			name: "ssh_config missing for SSH repo",
 			setup: func(t *testing.T) string {
 				t.Helper()
-				dir := writeRuntimeDir(t, []model.RepoConfig{validRepo})
+				dir := writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "ssh_config")))
 				return dir
 			},
-			repos:       []model.RepoConfig{validRepo},
+			repos:       []model.RepoConfig{sshRepo},
 			expectedErr: errRuntimeFileMissing,
 		},
 		{
-			name: "known_hosts missing",
+			name: "known_hosts missing for SSH repo",
 			setup: func(t *testing.T) string {
 				t.Helper()
-				dir := writeRuntimeDir(t, []model.RepoConfig{validRepo})
+				dir := writeRuntimeDir(t, []model.RepoConfig{sshRepo})
 				require.NoError(t, os.Remove(filepath.Join(dir, "known_hosts")))
 				return dir
 			},
-			repos:       []model.RepoConfig{validRepo},
+			repos:       []model.RepoConfig{sshRepo},
 			expectedErr: errRuntimeFileMissing,
 		},
 		{
 			name: "verifyCommit repo missing allowed-signers file",
 			setup: func(t *testing.T) string {
 				t.Helper()
-				return writeRuntimeDir(t, []model.RepoConfig{validRepo}) // no VerifyCommit, so no allowed-signers written
+				return writeRuntimeDir(t, []model.RepoConfig{sshRepo}) // no VerifyCommit, so no allowed-signers written
 			},
 			repos:       []model.RepoConfig{verifyRepo},
 			expectedErr: errMissingAllowedSigners,

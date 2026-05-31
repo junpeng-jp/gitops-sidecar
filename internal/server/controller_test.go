@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
@@ -25,6 +26,7 @@ func newTestGitOpsController(t *testing.T, repos []model.RepoConfig) (*GitOpsCon
 	state.Init(repos, cfg.WorkspaceDir)
 	git := &mocks.MockGitClient{}
 	engine := NewWorker(cfg, state, git, nil, slog.Default())
+	engine.enqueueTimeout = 50 * time.Millisecond
 	c := &GitOpsController{cfg: cfg, state: state, engine: engine, log: slog.Default()}
 	return c, cfg, state, engine
 }
@@ -150,6 +152,21 @@ func TestRepoOperation(t *testing.T) {
 			ctx:  context.Background(),
 			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
 				t.Helper()
+				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
+			},
+			repoConfig:  defaultRepoConfig,
+			request:     model.RepoOperationRequest{Name: "r", Body: model.RepoOperationBody{Kind: model.PullKind, Ref: "main"}},
+			expectedErr: errConflict,
+		},
+		{
+			name: "error path: conflict when repo state is syncing",
+			ctx:  context.Background(),
+			setup: func(t *testing.T, cfg *Config, s *storage.StateStore) {
+				t.Helper()
+				rs, err := s.Get("r")
+				require.NoError(t, err)
+				rs.State = model.StateSyncing
+				s.Set("r", rs)
 				require.NoError(t, os.MkdirAll(filepath.Join(cfg.WorkDir, "r", ".bare"), 0o755))
 			},
 			repoConfig:  defaultRepoConfig,

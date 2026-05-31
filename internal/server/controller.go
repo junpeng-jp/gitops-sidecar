@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
@@ -52,8 +53,11 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 	if err != nil {
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not found: %s: %w", req.Name, errNotFound)
 	}
-	if rs.State == model.StateInit {
+	switch rs.State {
+	case model.StateInit:
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not initialised: %s: %w", req.Name, errConflict)
+	case model.StateSyncing:
+		return model.RepoOperationResponse{}, fmt.Errorf("repo sync already in progress: %s: %w", req.Name, errConflict)
 	}
 	bareDir := filepath.Join(c.cfg.WorkDir, req.Name, ".bare")
 	if _, err := os.Stat(bareDir); errors.Is(err, os.ErrNotExist) {
@@ -67,7 +71,9 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 		if req.Body.Ref == "" {
 			return model.RepoOperationResponse{}, fmt.Errorf("ref is required for pull: %w", errBadRequest)
 		}
-		c.engine.Enqueue(model.PullCommand{Name: req.Name, Ref: req.Body.Ref})
+		if err := c.engine.Enqueue(model.PullCommand{Name: req.Name, Ref: req.Body.Ref}); err != nil {
+			return model.RepoOperationResponse{}, fmt.Errorf("enqueue pull: %w", err)
+		}
 		rs, err = c.state.Get(req.Name)
 		if err != nil {
 			return model.RepoOperationResponse{}, fmt.Errorf("get repo after enqueue: %w", err)
@@ -78,7 +84,21 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 	}
 }
 
+const resetLockTimeout = 10 * time.Second
+
 func (c *GitOpsController) Reset(_ context.Context) (model.ResetResponse, error) {
+	lockCtx, cancel := context.WithTimeout(context.Background(), resetLockTimeout)
+	defer cancel()
+
+	unlock, err := c.engine.AcquireResetLock(lockCtx)
+	if err != nil {
+		return model.ResetResponse{}, fmt.Errorf("reset: waiting for in-flight operation timed out: %w", err)
+	}
+	defer unlock()
+
+	// Discard any commands that were pending before the reset.
+	c.engine.DrainCommands()
+
 	if err := os.RemoveAll(c.cfg.WorkDir); err != nil {
 		return model.ResetResponse{}, fmt.Errorf("remove work dir: %w", err)
 	}
@@ -107,18 +127,22 @@ func (c *GitOpsController) Reset(_ context.Context) (model.ResetResponse, error)
 			if err != nil {
 				continue
 			}
-			c.notifier.Enqueue(model.RepoChangedEvent{
+			if err := c.notifier.Enqueue(model.RepoChangedEvent{
 				EventKind:     model.EventKindRepoChanged,
 				Name:          repo.Name,
 				State:         rs.State,
 				PreviousState: prevStates[repo.Name],
 				Ref:           rs.Ref,
-			})
+			}); err != nil {
+				c.log.Warn("reset: failed to notify", "repo", repo.Name, "err", err)
+			}
 		}
 	}
 
 	for _, repo := range c.cfg.Repos {
-		c.engine.Enqueue(model.InitCommand{Name: repo.Name})
+		if err := c.engine.Enqueue(model.InitCommand{Name: repo.Name}); err != nil {
+			c.log.Error("reset: failed to enqueue init", "repo", repo.Name, "err", err)
+		}
 	}
 	return model.ResetResponse{Success: true}, nil
 }
