@@ -14,6 +14,8 @@ type NotificationClient interface {
 	Notify(ctx context.Context, events []model.RepoChangedEvent) error
 }
 
+const defaultHTTPClientTimeout = 10 * time.Second
+
 type HomeAssistantNotificationWebhook struct {
 	url        string
 	httpClient *http.Client
@@ -22,7 +24,7 @@ type HomeAssistantNotificationWebhook struct {
 func NewHomeAssistantNotificationWebhook(url string) *HomeAssistantNotificationWebhook {
 	return &HomeAssistantNotificationWebhook{
 		url:        url,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		httpClient: &http.Client{Timeout: defaultHTTPClientTimeout},
 	}
 }
 
@@ -33,6 +35,7 @@ func (h *HomeAssistantNotificationWebhook) Notify(ctx context.Context, events []
 	if err != nil {
 		return err
 	}
+
 	return h.post(ctx, body)
 }
 
@@ -46,6 +49,7 @@ func (h *HomeAssistantNotificationWebhook) post(ctx context.Context, body []byte
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
+
 	return nil
 }

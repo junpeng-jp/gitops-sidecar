@@ -4,18 +4,22 @@ issues:
   max-same-issues: 3
 
 formatters:
+  disable:
+    - goimports
   enable:
     - gofmt
-    - goimports
+    - gci
     - golines
   settings:
     gofmt:
       rewrite-rules:
         - pattern: 'interface{}'
           replacement: 'any'
-    goimports:
-      local-prefixes:
-        - github.com/junpeng-jp/kaki
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/junpeng-jp/gitops-sidecar)
     golines:
       max-len: 120
       shorten-comments: true
@@ -24,6 +28,7 @@ formatters:
 linters:
   default: all
   disable:
+    - gomodguard      # deprecated
     - exhaustruct
     - varnamelen
     - wrapcheck
@@ -41,8 +46,15 @@ linters:
         - errcheck
         - funlen
         - goconst
-  
+
   settings:
+    mnd:
+      ignored-functions:
+        - os.MkdirAll
+        - os.Mkdir
+        - os.OpenFile
+        - os.Chmod
+        - os.WriteFile
     cyclop:
       max-complexity: 30
       package-average: 10
@@ -52,5 +64,5 @@ linters:
           files:
             - "$all"
           deny:
-            - pkg: github.com/golang/protobuf
-              desc: Use google.golang.org/protobuf instead, see https://developers.google.com/protocol-buffers/docs/reference/go/faq#modules
+            - pkg: io/ioutil
+              desc: Deprecated since Go 1.16. Use io and os packages instead

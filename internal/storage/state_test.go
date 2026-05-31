@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 )
 
 const (
@@ -45,8 +46,18 @@ func TestStateStore_Init(t *testing.T) {
 			},
 			workspaceDir: "/workspace",
 			expectedInit: map[string]model.RepoState{
-				repoAName: {Name: repoAName, State: model.StateInit, Ref: "", Path: filepath.Join("/workspace", repoAName)},
-				repoBName: {Name: repoBName, State: model.StateInit, Ref: "", Path: filepath.Join("/workspace", repoBName)},
+				repoAName: {
+					Name:  repoAName,
+					State: model.StateInit,
+					Ref:   "",
+					Path:  filepath.Join("/workspace", repoAName),
+				},
+				repoBName: {
+					Name:  repoBName,
+					State: model.StateInit,
+					Ref:   "",
+					Path:  filepath.Join("/workspace", repoBName),
+				},
 			},
 		},
 	}
@@ -99,6 +110,7 @@ func TestStateStore_Get(t *testing.T) {
 			rs, err := s.Get(tc.lookupName)
 			if tc.expectErr != nil {
 				require.ErrorIs(t, err, tc.expectErr)
+
 				return
 			}
 			require.NoError(t, err)
@@ -198,9 +210,28 @@ func TestStateStore_SetAll(t *testing.T) {
 				{Name: repoCName, URL: dummyURL},
 			}
 			s.Init(repos, wsPath)
-			s.Set(repoAName, model.RepoState{State: model.StateReady, Ref: refMain, Path: filepath.Join(wsPath, repoAName), LastUpdatedAt: &now})
-			s.Set(repoBName, model.RepoState{State: model.StateError, Ref: refMain, Path: filepath.Join(wsPath, repoBName), Error: "boom"})
-			s.Set(repoCName, model.RepoState{State: model.StateSyncing, Ref: refMain, Path: filepath.Join(wsPath, repoCName)})
+			s.Set(
+				repoAName,
+				model.RepoState{
+					State:         model.StateReady,
+					Ref:           refMain,
+					Path:          filepath.Join(wsPath, repoAName),
+					LastUpdatedAt: &now,
+				},
+			)
+			s.Set(
+				repoBName,
+				model.RepoState{
+					State: model.StateError,
+					Ref:   refMain,
+					Path:  filepath.Join(wsPath, repoBName),
+					Error: "boom",
+				},
+			)
+			s.Set(
+				repoCName,
+				model.RepoState{State: model.StateSyncing, Ref: refMain, Path: filepath.Join(wsPath, repoCName)},
+			)
 
 			s.SetAll(tc.targetState)
 

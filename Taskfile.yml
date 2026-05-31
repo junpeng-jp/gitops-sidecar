@@ -66,6 +66,11 @@ tasks:
     cmds:
       - go test -race ./...
 
+  fmt:
+    desc: Auto-fix formatting issues via golangci-lint
+    cmds:
+      - golangci-lint run --fix --modules-download-mode=vendor ./...
+
   lint:
     desc: Run golangci-lint
     cmds:

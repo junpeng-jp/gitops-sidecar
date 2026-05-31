@@ -45,10 +45,14 @@ func (c *GitOpsController) GetRepo(_ context.Context, req model.GetRepoRequest) 
 	if err != nil {
 		return model.GetRepoResponse{}, fmt.Errorf("repo not found: %s: %w", req.Name, errNotFound)
 	}
+
 	return model.GetRepoResponse{Repo: rs}, nil
 }
 
-func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperationRequest) (model.RepoOperationResponse, error) {
+func (c *GitOpsController) RepoOperation(
+	_ context.Context,
+	req model.RepoOperationRequest,
+) (model.RepoOperationResponse, error) {
 	rs, err := c.state.Get(req.Name)
 	if err != nil {
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not found: %s: %w", req.Name, errNotFound)
@@ -60,11 +64,15 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 		return model.RepoOperationResponse{}, fmt.Errorf("repo sync already in progress: %s: %w", req.Name, errConflict)
 	case model.StateResetting:
 		return model.RepoOperationResponse{}, fmt.Errorf("repo reset in progress: %s: %w", req.Name, errConflict)
+	case model.StateReady, model.StateError:
+		// proceed with operation
 	}
 	bareDir := filepath.Join(c.cfg.WorkDir, req.Name, ".bare")
-	if _, err := os.Stat(bareDir); errors.Is(err, os.ErrNotExist) {
+	_, err = os.Stat(bareDir)
+	if errors.Is(err, os.ErrNotExist) {
 		return model.RepoOperationResponse{}, fmt.Errorf("repo not initialised: %s: %w", req.Name, errConflict)
-	} else if err != nil {
+	}
+	if err != nil {
 		return model.RepoOperationResponse{}, fmt.Errorf("stat bare dir %s: %w", bareDir, err)
 	}
 
@@ -78,38 +86,18 @@ func (c *GitOpsController) RepoOperation(_ context.Context, req model.RepoOperat
 		if req.Body.Ref == "" {
 			return model.RepoOperationResponse{}, fmt.Errorf("ref is required for pull: %w", errBadRequest)
 		}
-		if err := w.Enqueue(model.PullCommand{Name: req.Name, Ref: req.Body.Ref}); err != nil {
+		err := w.Enqueue(model.PullCommand{Name: req.Name, Ref: req.Body.Ref})
+		if err != nil {
 			return model.RepoOperationResponse{}, fmt.Errorf("enqueue pull: %w", err)
 		}
 		rs, err = c.state.Get(req.Name)
 		if err != nil {
 			return model.RepoOperationResponse{}, fmt.Errorf("get repo after enqueue: %w", err)
 		}
+
 		return model.RepoOperationResponse{Repo: rs}, nil
 	default:
 		return model.RepoOperationResponse{}, fmt.Errorf("unknown operation kind %q: %w", req.Body.Kind, errBadRequest)
-	}
-}
-
-func (c *GitOpsController) notify(rs model.RepoState, prev model.RepoStateKind) {
-	if c.notifier == nil {
-		return
-	}
-	event := model.RepoChangedEvent{
-		EventKind:     model.EventKindRepoChanged,
-		Name:          rs.Name,
-		State:         rs.State,
-		PreviousState: prev,
-		Ref:           rs.Ref,
-		LastUpdatedAt: rs.LastUpdatedAt,
-		Error:         rs.Error,
-	}
-	t := time.NewTimer(3 * time.Second)
-	defer t.Stop()
-	select {
-	case c.notifier.Chan() <- event:
-	case <-t.C:
-		c.log.Warn("notify: queue full, dropping event", "repo", rs.Name, "state", rs.State)
 	}
 }
 
@@ -135,4 +123,26 @@ func (c *GitOpsController) Reset(_ context.Context) (model.ResetResponse, error)
 	}
 
 	return model.ResetResponse{Repos: newStates}, nil
+}
+
+func (c *GitOpsController) notify(rs model.RepoState, prev model.RepoStateKind) {
+	if c.notifier == nil {
+		return
+	}
+	event := model.RepoChangedEvent{
+		EventKind:     model.EventKindRepoChanged,
+		Name:          rs.Name,
+		State:         rs.State,
+		PreviousState: prev,
+		Ref:           rs.Ref,
+		LastUpdatedAt: rs.LastUpdatedAt,
+		Error:         rs.Error,
+	}
+	t := time.NewTimer(defaultEnqueueTimeout)
+	defer t.Stop()
+	select {
+	case c.notifier.Chan() <- event:
+	case <-t.C:
+		c.log.Warn("notify: queue full, dropping event", "repo", rs.Name, "state", rs.State)
+	}
 }
