@@ -51,14 +51,21 @@ func main() {
 	state.Init(cfg.Repos, cfg.WorkspaceDir)
 
 	var notificationWorker *server.NotificationWorker
+	var notifyCh chan<- model.RepoChangedEvent
 	if cfg.Notification != nil {
 		notifier := client.NewHomeAssistantNotificationWebhook(cfg.Notification.URL)
-		notificationWorker = server.NewNotificationWorker(notifier, cfg.Notification, logger)
+		notifyChan := make(chan model.RepoChangedEvent, cfg.Notification.QueueSize)
+		notificationWorker = server.NewNotificationWorker(notifier, notifyChan, cfg.Notification, logger)
+		notifyCh = notificationWorker.Chan()
 	}
 
 	gitCtrl := client.ShellGitClient{}
-	engine := server.NewWorker(cfg, &state, gitCtrl, notificationWorker, logger)
-	gitOpsServer := server.NewServer(cfg, &state, engine, notificationWorker, logger, version, commit, date)
+	workers := make(map[string]*server.Worker, len(cfg.Repos))
+	for _, repo := range cfg.Repos {
+		cmdCh := make(chan model.Command, repo.CommandQueueSize)
+		workers[repo.Name] = server.NewWorker(cfg, repo, cmdCh, &state, gitCtrl, notifyCh, logger)
+	}
+	gitOpsServer := server.NewServer(cfg, &state, workers, notificationWorker, logger, version, commit, date)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -66,7 +73,9 @@ func main() {
 	if notificationWorker != nil {
 		go notificationWorker.Run(ctx)
 	}
-	go engine.Run(ctx)
+	for _, w := range workers {
+		go w.Run(ctx)
+	}
 
 	go func() {
 		logger.Info("server listening", "port", cfg.Port)
@@ -76,13 +85,15 @@ func main() {
 	}()
 
 	for _, repo := range cfg.Repos {
-		engine.Enqueue(model.InitCommand{Name: repo.Name})
+		if err := workers[repo.Name].Enqueue(model.InitCommand{Name: repo.Name}); err != nil {
+			logger.Error("enqueue init command", "repo", repo.Name, "err", err)
+		}
 	}
 
 	<-ctx.Done()
 	logger.Info("shutting down")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := gitOpsServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("server shutdown", "err", err)

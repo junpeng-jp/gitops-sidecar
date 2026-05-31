@@ -29,3 +29,11 @@ type PullCommand struct {
 
 func (PullCommand) isCommand()         {}
 func (c PullCommand) RepoName() string { return c.Name }
+
+// ResetCommand wipes the named repo's on-disk state.
+type ResetCommand struct {
+	Name string
+}
+
+func (ResetCommand) isCommand()         {}
+func (c ResetCommand) RepoName() string { return c.Name }

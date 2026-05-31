@@ -17,22 +17,19 @@ type NotificationWorker struct {
 	log           *slog.Logger
 }
 
-func NewNotificationWorker(notifier client.NotificationClient, cfg *model.NotificationConfig, log *slog.Logger) *NotificationWorker {
+func NewNotificationWorker(notifier client.NotificationClient, ch chan model.RepoChangedEvent, cfg *model.NotificationConfig, log *slog.Logger) *NotificationWorker {
 	return &NotificationWorker{
 		notifier:      notifier,
-		ch:            make(chan model.RepoChangedEvent, 64),
+		ch:            ch,
 		maxBatchSize:  cfg.MaxBatchSize,
 		batchInterval: time.Duration(cfg.BatchInterval),
 		log:           log,
 	}
 }
 
-func (n *NotificationWorker) Enqueue(event model.RepoChangedEvent) {
-	select {
-	case n.ch <- event:
-	default:
-		n.log.Warn("notification queue full, dropping event", "repo", event.Name, "state", event.State)
-	}
+// Chan returns the send-only end of the notification channel.
+func (n *NotificationWorker) Chan() chan<- model.RepoChangedEvent {
+	return n.ch
 }
 
 func (n *NotificationWorker) Run(ctx context.Context) {
@@ -41,11 +38,11 @@ func (n *NotificationWorker) Run(ctx context.Context) {
 
 	batch := make([]model.RepoChangedEvent, 0, n.maxBatchSize)
 
-	flush := func() {
+	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		if err := n.notifier.Notify(ctx, batch); err != nil {
+		if err := n.notifier.Notify(flushCtx, batch); err != nil {
 			n.log.Error("notify failed", "err", err)
 		}
 		batch = batch[:0]
@@ -54,17 +51,32 @@ func (n *NotificationWorker) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			// Drain any events that arrived just before shutdown and do a final flush.
+			drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			for {
+				select {
+				case event := <-n.ch:
+					batch = append(batch, event)
+					if len(batch) >= n.maxBatchSize {
+						flush(drainCtx)
+					}
+				default:
+					flush(drainCtx)
+					return
+				}
+			}
 		case event, ok := <-n.ch:
 			if !ok {
+				flush(ctx)
 				return
 			}
 			batch = append(batch, event)
 			if len(batch) >= n.maxBatchSize {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		}
 	}
 }

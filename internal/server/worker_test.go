@@ -16,75 +16,72 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestWorker(t *testing.T, repos []model.RepoConfig) (*Worker, *storage.StateStore, *mocks.MockGitClient) {
+func newTestWorker(t *testing.T, repo model.RepoConfig) (*Worker, *storage.StateStore, *mocks.MockGitClient) {
 	t.Helper()
 	cfg := &Config{
 		WorkDir:      t.TempDir(),
 		WorkspaceDir: t.TempDir(),
-		Repos:        repos,
+		Repos:        []model.RepoConfig{repo},
 	}
 	state := &storage.StateStore{}
-	state.Init(repos, cfg.WorkspaceDir)
+	state.Init([]model.RepoConfig{repo}, cfg.WorkspaceDir)
 	git := &mocks.MockGitClient{}
-	engine := NewWorker(cfg, state, git, nil, slog.Default())
+	cmdCh := make(chan model.Command, 16)
+	engine := NewWorker(cfg, repo, cmdCh, state, git, nil, slog.Default())
+	engine.enqueueTimeout = 50 * time.Millisecond
 	return engine, state, git
 }
 
 func TestWorker_HandleInit(t *testing.T) {
 	t.Parallel()
-	repos := []model.RepoConfig{{Name: "r", URL: "git@github.com/r.git"}}
+	repo := model.RepoConfig{Name: "r", URL: "git@github.com/r.git"}
 
 	testCases := []struct {
 		name          string
-		targetName    string
 		setupMock     func(git *mocks.MockGitClient, bareDir string)
-		checkRepoName string
 		expectedState model.RepoStateKind
 		expectedErr   error
 	}{
 		{
-			name:       "happy path: bare clone succeeds transitions to ready",
-			targetName: "r",
+			name: "happy path: bare clone succeeds transitions to ready",
 			setupMock: func(git *mocks.MockGitClient, bareDir string) {
 				git.On("BareClone", mock.Anything, "git@github.com/r.git", bareDir).Return(nil)
 			},
-			checkRepoName: "r",
 			expectedState: model.StateReady,
 		},
 		{
-			name:       "error path: bare clone fails",
-			targetName: "r",
+			name: "happy path: existing bare repo skips clone",
+			setupMock: func(git *mocks.MockGitClient, bareDir string) {
+				_ = os.MkdirAll(bareDir, 0o755)
+				_ = os.WriteFile(filepath.Join(bareDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600)
+			},
+			expectedState: model.StateReady,
+		},
+		{
+			name: "error path: bare clone fails",
 			setupMock: func(git *mocks.MockGitClient, bareDir string) {
 				git.On("BareClone", mock.Anything, "git@github.com/r.git", bareDir).Return(errCloneFailed)
 			},
-			checkRepoName: "r",
 			expectedState: model.StateError,
 			expectedErr:   errCloneFailed,
-		},
-		{
-			name:          "error path: unknown repo is ignored",
-			targetName:    "nonexistent",
-			setupMock:     func(*mocks.MockGitClient, string) {},
-			checkRepoName: "r",
-			expectedState: model.StateInit,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			engine, state, git := newTestWorker(t, repos)
+			engine, state, git := newTestWorker(t, repo)
 
 			bareDir := filepath.Join(engine.cfg.WorkDir, "r", ".bare")
 			tc.setupMock(git, bareDir)
 
-			engine.handleInit(context.Background(), tc.targetName)
+			engine.handleInit(context.Background())
 
-			rs, ok := state.Get(tc.checkRepoName)
-			require.True(t, ok)
+			rs, err := state.Get("r")
+			require.NoError(t, err)
 			assert.Equal(t, tc.expectedState, rs.State)
 			if tc.expectedErr != nil {
-				assert.Equal(t, tc.expectedErr.Error(), rs.Error)
+				assert.Contains(t, rs.Error, tc.expectedErr.Error())
 			} else {
 				assert.Empty(t, rs.Error)
 			}
@@ -105,16 +102,14 @@ func TestWorker_HandlePull(t *testing.T) {
 	testCases := []struct {
 		name          string
 		verifyCommit  bool
-		targetName    string
 		setupMock     func(git *mocks.MockGitClient, bareDir, worktreeDir string)
-		checkRepoName string
 		expectedState model.RepoStateKind
 		expectedErr   error
 		expectUpdated bool
+		expectedRef   string
 	}{
 		{
-			name:       "happy path: sync succeeds",
-			targetName: "r",
+			name: "happy path: sync succeeds",
 			setupMock: func(git *mocks.MockGitClient, bareDir, wtDir string) {
 				tmpDir := wtDir + ".new"
 				git.On("Fetch", mock.Anything, bareDir).Return(nil)
@@ -123,14 +118,13 @@ func TestWorker_HandlePull(t *testing.T) {
 					Return(nil).
 					Run(func(args mock.Arguments) { os.MkdirAll(args.String(2), 0o755) })
 			},
-			checkRepoName: "r",
 			expectedState: model.StateReady,
 			expectUpdated: true,
+			expectedRef:   "main",
 		},
 		{
 			name:         "happy path: sync succeeds with commit verification",
 			verifyCommit: true,
-			targetName:   "r",
 			setupMock: func(git *mocks.MockGitClient, bareDir, wtDir string) {
 				tmpDir := wtDir + ".new"
 				git.On("Fetch", mock.Anything, bareDir).Return(nil)
@@ -140,90 +134,78 @@ func TestWorker_HandlePull(t *testing.T) {
 					Run(func(args mock.Arguments) { os.MkdirAll(args.String(2), 0o755) })
 				git.On("VerifyCommit", mock.Anything, tmpDir).Return(nil)
 			},
-			checkRepoName: "r",
 			expectedState: model.StateReady,
 			expectUpdated: true,
+			expectedRef:   "main",
 		},
 		{
-			name:       "error path: fetch fails",
-			targetName: "r",
+			name: "error path: fetch fails",
 			setupMock: func(git *mocks.MockGitClient, bareDir, _ string) {
 				git.On("Fetch", mock.Anything, bareDir).Return(errFetchFailed)
 			},
-			checkRepoName: "r",
 			expectedState: model.StateError,
 			expectedErr:   errFetchFailed,
 		},
 		{
-			name:       "error path: worktree prune fails",
-			targetName: "r",
+			name: "error path: worktree prune fails",
 			setupMock: func(git *mocks.MockGitClient, bareDir, _ string) {
 				git.On("Fetch", mock.Anything, bareDir).Return(nil)
 				git.On("WorktreePrune", mock.Anything, bareDir).Return(errPruneFailed)
 			},
-			checkRepoName: "r",
 			expectedState: model.StateError,
 			expectedErr:   errPruneFailed,
 		},
 		{
-			name:       "error path: worktree add fails",
-			targetName: "r",
+			name: "error path: worktree add fails",
 			setupMock: func(git *mocks.MockGitClient, bareDir, wtDir string) {
 				tmpDir := wtDir + ".new"
 				git.On("Fetch", mock.Anything, bareDir).Return(nil)
 				git.On("WorktreePrune", mock.Anything, bareDir).Return(nil)
 				git.On("WorktreeAdd", mock.Anything, bareDir, tmpDir, "main").Return(errAddFailed)
 			},
-			checkRepoName: "r",
 			expectedState: model.StateError,
 			expectedErr:   errAddFailed,
 		},
 		{
 			name:         "error path: commit verification fails",
 			verifyCommit: true,
-			targetName:   "r",
 			setupMock: func(git *mocks.MockGitClient, bareDir, wtDir string) {
 				tmpDir := wtDir + ".new"
 				git.On("Fetch", mock.Anything, bareDir).Return(nil)
-				git.On("WorktreePrune", mock.Anything, bareDir).Return(nil) // called twice: before add and cleanup
+				git.On("WorktreePrune", mock.Anything, bareDir).Return(nil)
 				git.On("WorktreeAdd", mock.Anything, bareDir, tmpDir, "main").Return(nil)
 				git.On("VerifyCommit", mock.Anything, tmpDir).Return(errBadSignature)
 			},
-			checkRepoName: "r",
 			expectedState: model.StateError,
 			expectedErr:   errBadSignature,
-		},
-		{
-			name:          "error path: unknown repo is ignored",
-			targetName:    "nonexistent",
-			setupMock:     func(*mocks.MockGitClient, string, string) {},
-			checkRepoName: "r",
-			expectedState: model.StateInit,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			repos := []model.RepoConfig{{Name: "r", URL: "url", VerifyCommit: tc.verifyCommit}}
-			engine, state, git := newTestWorker(t, repos)
+			repo := model.RepoConfig{Name: "r", URL: "url", VerifyCommit: tc.verifyCommit}
+			engine, state, git := newTestWorker(t, repo)
 
 			bareDir := filepath.Join(engine.cfg.WorkDir, "r", ".bare")
 			worktreeDir := filepath.Join(engine.cfg.WorkspaceDir, "r")
 			tc.setupMock(git, bareDir, worktreeDir)
 
-			engine.handlePull(context.Background(), model.PullCommand{Name: tc.targetName, Ref: "main"})
+			engine.handlePull(context.Background(), model.PullCommand{Name: "r", Ref: "main"})
 
-			rs, ok := state.Get(tc.checkRepoName)
-			require.True(t, ok)
+			rs, err := state.Get("r")
+			require.NoError(t, err)
 			assert.Equal(t, tc.expectedState, rs.State)
 			if tc.expectedErr != nil {
-				assert.Equal(t, tc.expectedErr.Error(), rs.Error)
+				assert.Contains(t, rs.Error, tc.expectedErr.Error())
 			} else {
 				assert.Empty(t, rs.Error)
 			}
 			if tc.expectUpdated {
 				assert.NotNil(t, rs.LastUpdatedAt)
+			}
+			if tc.expectedRef != "" {
+				assert.Equal(t, tc.expectedRef, rs.Ref)
 			}
 
 			git.AssertExpectations(t)
@@ -231,68 +213,84 @@ func TestWorker_HandlePull(t *testing.T) {
 	}
 }
 
+func TestWorker_HandleReset(t *testing.T) {
+	t.Parallel()
+	repo := model.RepoConfig{Name: "r", URL: "url"}
+
+	t.Run("happy path: removes repo dirs and transitions to init", func(t *testing.T) {
+		t.Parallel()
+		engine, state, _ := newTestWorker(t, repo)
+
+		bareDir := filepath.Join(engine.cfg.WorkDir, "r", ".bare")
+		require.NoError(t, os.MkdirAll(bareDir, 0o755))
+		sentinel := filepath.Join(bareDir, "HEAD")
+		require.NoError(t, os.WriteFile(sentinel, []byte("ref: refs/heads/main\n"), 0o600))
+
+		engine.handleReset(context.Background(), model.ResetCommand{Name: "r"})
+
+		assert.NoDirExists(t, filepath.Join(engine.cfg.WorkDir, "r"))
+		rs, err := state.Get("r")
+		require.NoError(t, err)
+		assert.Equal(t, model.StateInit, rs.State)
+		assert.Empty(t, rs.Ref)
+		assert.Empty(t, rs.Error)
+		assert.Nil(t, rs.LastUpdatedAt)
+	})
+
+	t.Run("happy path: succeeds when dirs do not exist", func(t *testing.T) {
+		t.Parallel()
+		engine, state, _ := newTestWorker(t, repo)
+
+		engine.handleReset(context.Background(), model.ResetCommand{Name: "r"})
+
+		rs, err := state.Get("r")
+		require.NoError(t, err)
+		assert.Equal(t, model.StateInit, rs.State)
+	})
+}
+
 func TestWorker_Enqueue(t *testing.T) {
 	t.Parallel()
-	testCases := []struct {
-		name       string
-		prefill    int
-		expectDrop bool
-	}{
-		{
-			name:       "happy path: enqueues when channel has capacity",
-			prefill:    0,
-			expectDrop: false,
-		},
-		{
-			name:       "edge case: silently drops when channel is full",
-			prefill:    16,
-			expectDrop: true,
-		},
-	}
+	repo := model.RepoConfig{Name: "r", URL: "url"}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			repos := []model.RepoConfig{{Name: "r", URL: "url"}}
-			engine, _, _ := newTestWorker(t, repos)
+	t.Run("happy path: enqueues when channel has capacity", func(t *testing.T) {
+		t.Parallel()
+		engine, _, _ := newTestWorker(t, repo)
+		err := engine.Enqueue(model.PullCommand{Name: "r"})
+		require.NoError(t, err)
+		assert.Len(t, engine.cmdCh, 1)
+	})
 
-			for i := 0; i < tc.prefill; i++ {
-				engine.Enqueue(model.PullCommand{Name: "r"})
-			}
+	t.Run("error path: returns error when channel is full", func(t *testing.T) {
+		t.Parallel()
+		engine, _, _ := newTestWorker(t, repo)
 
-			done := make(chan struct{})
-			go func() {
-				engine.Enqueue(model.PullCommand{Name: "r"})
-				close(done)
-			}()
-			select {
-			case <-done:
-			case <-time.After(100 * time.Millisecond):
-				t.Fatal("Enqueue blocked unexpectedly")
-			}
+		for i := 0; i < cap(engine.cmdCh); i++ {
+			require.NoError(t, engine.Enqueue(model.PullCommand{Name: "r"}))
+		}
 
-			if !tc.expectDrop {
-				assert.Len(t, engine.cmdCh, 1)
-			} else {
-				assert.Len(t, engine.cmdCh, cap(engine.cmdCh))
-			}
-		})
-	}
+		start := time.Now()
+		err := engine.Enqueue(model.PullCommand{Name: "r"})
+		elapsed := time.Since(start)
+
+		assert.Error(t, err)
+		assert.GreaterOrEqual(t, elapsed, 40*time.Millisecond)
+		assert.Less(t, elapsed, 500*time.Millisecond)
+	})
 }
 
 func TestWorker_Run(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
 		name          string
-		repos         []model.RepoConfig
-		nilNotify     bool
+		repo          model.RepoConfig
 		setupMock     func(git *mocks.MockGitClient, bareDir, worktreeDir string)
-		enqueue       func(engine *Worker)
+		enqueue       func(t *testing.T, engine *Worker)
 		expectedState model.RepoStateKind
 	}{
 		{
-			name:  "happy path: init then pull reaches ready state",
-			repos: []model.RepoConfig{{Name: "r", URL: "git@github.com/r.git"}},
+			name: "happy path: init then pull reaches ready state",
+			repo: model.RepoConfig{Name: "r", URL: "git@github.com/r.git"},
 			setupMock: func(git *mocks.MockGitClient, bareDir, wtDir string) {
 				tmpDir := wtDir + ".new"
 				git.On("BareClone", mock.Anything, "git@github.com/r.git", bareDir).Return(nil)
@@ -302,41 +300,70 @@ func TestWorker_Run(t *testing.T) {
 					Return(nil).
 					Run(func(args mock.Arguments) { os.MkdirAll(args.String(2), 0o755) })
 			},
-			enqueue: func(e *Worker) {
-				e.Enqueue(model.InitCommand{Name: "r"})
-				e.Enqueue(model.PullCommand{Name: "r", Ref: "main"})
+			enqueue: func(t *testing.T, e *Worker) {
+				require.NoError(t, e.Enqueue(model.InitCommand{Name: "r"}))
+				require.NoError(t, e.Enqueue(model.PullCommand{Name: "r", Ref: "main"}))
 			},
 			expectedState: model.StateReady,
 		},
 		{
-			name:  "error path: bare clone failure leaves repo in error state",
-			repos: []model.RepoConfig{{Name: "r", URL: "url"}},
+			name: "error path: bare clone failure leaves repo in error state",
+			repo: model.RepoConfig{Name: "r", URL: "url"},
 			setupMock: func(git *mocks.MockGitClient, bareDir, _ string) {
 				git.On("BareClone", mock.Anything, "url", bareDir).Return(errCloneFailed)
 			},
-			enqueue: func(e *Worker) {
-				e.Enqueue(model.InitCommand{Name: "r"})
+			enqueue: func(t *testing.T, e *Worker) {
+				require.NoError(t, e.Enqueue(model.InitCommand{Name: "r"}))
 			},
 			expectedState: model.StateError,
 		},
 		{
-			name:      "edge case: nil notify client does not panic",
-			repos:     []model.RepoConfig{{Name: "r", URL: "url"}},
-			nilNotify: true,
+			name: "edge case: nil notify client does not panic",
+			repo: model.RepoConfig{Name: "r", URL: "url"},
 			setupMock: func(git *mocks.MockGitClient, bareDir, _ string) {
 				git.On("BareClone", mock.Anything, "url", bareDir).Return(errCloneFailed)
 			},
-			enqueue: func(e *Worker) {
-				e.Enqueue(model.InitCommand{Name: "r"})
+			enqueue: func(t *testing.T, e *Worker) {
+				require.NoError(t, e.Enqueue(model.InitCommand{Name: "r"}))
 			},
 			expectedState: model.StateError,
+		},
+		{
+			name:      "edge case: pull skipped when repo is resetting",
+			repo:      model.RepoConfig{Name: "r", URL: "url"},
+			setupMock: func(_ *mocks.MockGitClient, _, _ string) {},
+			enqueue: func(t *testing.T, e *Worker) {
+				rs, err := e.state.Get("r")
+				require.NoError(t, err)
+				rs.State = model.StateResetting
+				e.state.Set("r", rs)
+				require.NoError(t, e.Enqueue(model.PullCommand{Name: "r", Ref: "main"}))
+				// Follow with reset so the worker has something to drain to after the skip.
+				require.NoError(t, e.Enqueue(model.ResetCommand{Name: "r"}))
+			},
+			expectedState: model.StateInit,
+		},
+		{
+			name:      "edge case: init skipped when repo is resetting",
+			repo:      model.RepoConfig{Name: "r", URL: "url"},
+			setupMock: func(_ *mocks.MockGitClient, _, _ string) {},
+			enqueue: func(t *testing.T, e *Worker) {
+				rs, err := e.state.Get("r")
+				require.NoError(t, err)
+				rs.State = model.StateResetting
+				e.state.Set("r", rs)
+				require.NoError(t, e.Enqueue(model.InitCommand{Name: "r"}))
+				// Follow with reset so the worker has something to drain to after the skip.
+				require.NoError(t, e.Enqueue(model.ResetCommand{Name: "r"}))
+			},
+			expectedState: model.StateInit,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			engine, state, git := newTestWorker(t, tc.repos)
+			engine, state, git := newTestWorker(t, tc.repo)
 
 			bareDir := filepath.Join(engine.cfg.WorkDir, "r", ".bare")
 			worktreeDir := filepath.Join(engine.cfg.WorkspaceDir, "r")
@@ -346,10 +373,11 @@ func TestWorker_Run(t *testing.T) {
 			defer cancel()
 			go engine.Run(ctx)
 
-			tc.enqueue(engine)
+			tc.enqueue(t, engine)
 
 			require.Eventually(t, func() bool {
-				rs, _ := state.Get("r")
+				rs, err := state.Get("r")
+				require.NoError(t, err)
 				return rs.State == tc.expectedState
 			}, 5*time.Second, 10*time.Millisecond)
 

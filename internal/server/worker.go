@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -14,209 +15,264 @@ import (
 	"github.com/junpeng-jp/gitops-sidecar/internal/storage"
 )
 
+const defaultEnqueueTimeout = 3 * time.Second
+
 var (
 	errCloneFailed  = errors.New("clone failed")
 	errFetchFailed  = errors.New("fetch error")
 	errPruneFailed  = errors.New("prune error")
 	errAddFailed    = errors.New("add error")
+	errSwapFailed   = errors.New("swap failed")
 	errBadSignature = errors.New("bad signature")
 )
 
 type Worker struct {
-	cfg      *Config
-	state    *storage.StateStore
-	git      client.GitClient
-	notifier *NotificationWorker
-	log      *slog.Logger
-	cmdCh    chan model.Command
+	cfg            *Config
+	repo           model.RepoConfig
+	state          *storage.StateStore
+	git            client.GitClient
+	notifyCh       chan<- model.RepoChangedEvent
+	log            *slog.Logger
+	cmdCh          chan model.Command
+	enqueueTimeout time.Duration
 }
 
-func NewWorker(cfg *Config, state *storage.StateStore, git client.GitClient, notifier *NotificationWorker, log *slog.Logger) *Worker {
+func NewWorker(cfg *Config, repo model.RepoConfig, cmdCh chan model.Command, state *storage.StateStore, git client.GitClient, notifyCh chan<- model.RepoChangedEvent, log *slog.Logger) *Worker {
 	return &Worker{
-		cfg:      cfg,
-		state:    state,
-		git:      git,
-		notifier: notifier,
-		log:      log,
-		cmdCh:    make(chan model.Command, 16),
+		cfg:            cfg,
+		repo:           repo,
+		state:          state,
+		git:            git,
+		notifyCh:       notifyCh,
+		log:            log,
+		cmdCh:          cmdCh,
+		enqueueTimeout: defaultEnqueueTimeout,
 	}
 }
 
-func (e *Worker) Enqueue(cmd model.Command) {
+func (w *Worker) Enqueue(cmd model.Command) error {
+	t := time.NewTimer(w.enqueueTimeout)
+	defer t.Stop()
 	select {
-	case e.cmdCh <- cmd:
-	default:
-		e.log.Warn("channel full, dropping command", "repo", cmd.RepoName())
+	case w.cmdCh <- cmd:
+		return nil
+	case <-t.C:
+		w.log.Warn("enqueue timeout: worker queue full", "repo", cmd.RepoName())
+		return fmt.Errorf("worker queue full for repo %s", cmd.RepoName())
 	}
 }
 
-func (e *Worker) Run(ctx context.Context) {
+func (w *Worker) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case cmd, ok := <-e.cmdCh:
+		case cmd, ok := <-w.cmdCh:
 			if !ok {
 				return
 			}
 			switch c := cmd.(type) {
 			case model.InitCommand:
-				e.handleInit(ctx, c.Name)
+				rs, err := w.state.Get(c.Name)
+				if err == nil && rs.State == model.StateResetting {
+					w.log.Info("skip init: reset in progress", "repo", c.Name)
+					continue
+				}
+				w.handleInit(ctx)
 			case model.PullCommand:
-				e.handlePull(ctx, c)
+				rs, err := w.state.Get(c.Name)
+				if err == nil && rs.State == model.StateResetting {
+					w.log.Info("skip pull: reset in progress", "repo", c.Name, "ref", c.Ref)
+					continue
+				}
+				w.handlePull(ctx, c)
+			case model.ResetCommand:
+				w.handleReset(ctx, c)
 			}
 		}
 	}
 }
 
-func (e *Worker) handleInit(ctx context.Context, name string) {
-	repo, ok := e.repoConfig(name)
-	if !ok {
-		e.log.Error("init: unknown repo", "repo", name)
+func (w *Worker) handleInit(ctx context.Context) {
+	name := w.repo.Name
+	bareDir := filepath.Join(w.cfg.WorkDir, name, ".bare")
+
+	_, err := os.Stat(filepath.Join(bareDir, "HEAD"))
+	if err == nil {
+		repoState, prev := w.transition(name, model.StateReady, "", nil)
+		w.notify(name, repoState, prev)
 		return
 	}
 
-	bareDir := filepath.Join(e.cfg.WorkDir, name, ".bare")
-	if err := e.git.BareClone(ctx, repo.URL, bareDir); err != nil {
-		rs, prev := e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+	err = w.git.BareClone(ctx, w.repo.URL, bareDir)
+	if err != nil {
+		repoState, prev := w.transition(name, model.StateError, "", fmt.Errorf("%w: %w", errCloneFailed, err))
+		w.notify(name, repoState, prev)
 		return
 	}
 
-	rs, prev := e.transition(name, model.StateReady, "")
-	e.notify(name, rs, prev)
+	repoState, prev := w.transition(name, model.StateReady, "", nil)
+	w.notify(name, repoState, prev)
 }
 
-func (e *Worker) handlePull(ctx context.Context, cmd model.PullCommand) {
-	name := cmd.Name
-	log := e.log.With("repo", name, "ref", cmd.Ref)
+func (w *Worker) handlePull(ctx context.Context, cmd model.PullCommand) {
+	name := w.repo.Name
+	log := w.log.With("repo", name, "ref", cmd.Ref)
 
-	_, ok := e.repoConfig(name)
-	if !ok {
-		log.Error("pull: unknown repo")
-		return
-	}
+	repoState, prev := w.transition(name, model.StateSyncing, "", nil)
+	w.notify(name, repoState, prev)
 
-	rs, prev := e.transition(name, model.StateSyncing, "")
-	e.notify(name, rs, prev)
-
-	bareDir := filepath.Join(e.cfg.WorkDir, name, ".bare")
-	worktreeDir := filepath.Join(e.cfg.WorkspaceDir, name)
+	bareDir := filepath.Join(w.cfg.WorkDir, name, ".bare")
+	worktreeDir := filepath.Join(w.cfg.WorkspaceDir, name)
 	tmpDir := worktreeDir + ".new"
 
-	if err := e.git.Fetch(ctx, bareDir); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+	err := w.git.Fetch(ctx, bareDir)
+	if err != nil {
+		repoState, prev = w.transition(name, model.StateError, "", fmt.Errorf("%w: %w", errFetchFailed, err))
+		w.notify(name, repoState, prev)
 		return
 	}
 
-	if err := os.RemoveAll(tmpDir); err != nil {
+	err = os.RemoveAll(tmpDir)
+	if err != nil {
 		log.Warn("cleanup leftover tmpDir", "err", err)
 	}
 
-	if err := e.git.WorktreePrune(ctx, bareDir); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+	err = w.git.WorktreePrune(ctx, bareDir)
+	if err != nil {
+		repoState, prev = w.transition(name, model.StateError, "", fmt.Errorf("%w: %w", errPruneFailed, err))
+		w.notify(name, repoState, prev)
 		return
 	}
 
-	if err := os.MkdirAll(filepath.Dir(tmpDir), 0o755); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+	err = os.MkdirAll(filepath.Dir(tmpDir), 0o755)
+	if err != nil {
+		repoState, prev = w.transition(name, model.StateError, "", fmt.Errorf("mkdir %s: %w", filepath.Dir(tmpDir), err))
+		w.notify(name, repoState, prev)
 		return
 	}
 
-	if err := e.git.WorktreeAdd(ctx, bareDir, tmpDir, cmd.Ref); err != nil {
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+	err = w.git.WorktreeAdd(ctx, bareDir, tmpDir, cmd.Ref)
+	if err != nil {
+		repoState, prev = w.transition(name, model.StateError, "", fmt.Errorf("%w: %w", errAddFailed, err))
+		w.notify(name, repoState, prev)
 		return
 	}
 
-	repo, _ := e.repoConfig(name)
-	if repo.VerifyCommit {
-		if err := e.git.VerifyCommit(ctx, tmpDir); err != nil {
+	if w.repo.VerifyCommit {
+		if err := w.git.VerifyCommit(ctx, tmpDir); err != nil {
 			if cleanErr := os.RemoveAll(tmpDir); cleanErr != nil {
 				log.Warn("cleanup tmpDir after verify failure", "err", cleanErr)
 			}
-			if pruneErr := e.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
+			if pruneErr := w.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
 				log.Warn("prune after verify failure", "err", pruneErr)
 			}
-			rs, prev = e.transition(name, model.StateError, err.Error())
-			e.notify(name, rs, prev)
+			repoState, prev = w.transition(name, model.StateError, "", fmt.Errorf("%w: %w", errBadSignature, err))
+			w.notify(name, repoState, prev)
 			return
 		}
 	}
 
-	// Atomic swap: move old content aside then move new content into place.
-	// Both renames are within the same directory so each is a single syscall.
 	oldDir := worktreeDir + ".old"
 	if err := os.RemoveAll(oldDir); err != nil {
 		log.Warn("cleanup leftover oldDir", "err", err)
 	}
-	if err := os.Rename(worktreeDir, oldDir); err != nil && !os.IsNotExist(err) {
+	// os.ErrNotExist is success: no previous worktree on first pull
+	err = os.Rename(worktreeDir, oldDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		if cleanErr := os.RemoveAll(tmpDir); cleanErr != nil {
 			log.Warn("cleanup tmpDir after rename-to-old failure", "err", cleanErr)
 		}
-		if pruneErr := e.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
+		if pruneErr := w.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
 			log.Warn("prune after rename-to-old failure", "err", pruneErr)
 		}
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = w.transition(name, model.StateError, "", fmt.Errorf("%w: %w", errSwapFailed, err))
+		w.notify(name, repoState, prev)
 		return
 	}
-	if err := os.Rename(tmpDir, worktreeDir); err != nil {
+	err = os.Rename(tmpDir, worktreeDir)
+	if err != nil {
 		if restoreErr := os.Rename(oldDir, worktreeDir); restoreErr != nil {
 			log.Error("restore worktree after rename-to-new failure", "err", restoreErr)
 		}
 		if cleanErr := os.RemoveAll(tmpDir); cleanErr != nil {
 			log.Warn("cleanup tmpDir after rename-to-new failure", "err", cleanErr)
 		}
-		if pruneErr := e.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
+		if pruneErr := w.git.WorktreePrune(ctx, bareDir); pruneErr != nil {
 			log.Warn("prune after rename-to-new failure", "err", pruneErr)
 		}
-		rs, prev = e.transition(name, model.StateError, err.Error())
-		e.notify(name, rs, prev)
+		repoState, prev = w.transition(name, model.StateError, "", err)
+		w.notify(name, repoState, prev)
 		return
 	}
-	if err := os.RemoveAll(oldDir); err != nil {
+	err = os.RemoveAll(oldDir)
+	if err != nil {
 		log.Warn("cleanup oldDir after successful swap", "err", err)
 	}
-	if err := e.git.WorktreePrune(ctx, bareDir); err != nil {
+	err = w.git.WorktreePrune(ctx, bareDir)
+	if err != nil {
 		log.Warn("prune after successful swap", "err", err)
 	}
 
-	rs, prev = e.transition(name, model.StateReady, "")
-	rs.Ref = cmd.Ref
-	e.state.Set(name, rs)
-	e.notify(name, rs, prev)
+	repoState, prev = w.transition(name, model.StateReady, cmd.Ref, nil)
+	w.notify(name, repoState, prev)
 }
 
-func (e *Worker) transition(name string, kind model.RepoStateKind, errMsg string) (model.RepoState, model.RepoStateKind) {
-	rs, _ := e.state.Get(name)
-	prev := rs.State
-	rs.State = kind
-	switch kind {
-	case model.StateInit:
-		rs.Error = ""
-		rs.LastUpdatedAt = nil
-	case model.StateSyncing:
-		rs.Error = ""
-	case model.StateReady:
-		now := time.Now()
-		rs.Error = ""
-		rs.LastUpdatedAt = &now
-	case model.StateError:
-		rs.Error = errMsg
-	}
-	e.state.Set(name, rs)
-	return rs, prev
-}
-
-func (e *Worker) notify(name string, state model.RepoState, prev model.RepoStateKind) {
-	if e.notifier == nil {
+func (w *Worker) handleReset(_ context.Context, cmd model.ResetCommand) {
+	name := w.repo.Name
+	err := os.RemoveAll(filepath.Join(w.cfg.WorkDir, name))
+	if err != nil {
+		repoState, prev := w.transition(name, model.StateError, "", fmt.Errorf("remove work dir: %w", err))
+		w.notify(name, repoState, prev)
 		return
 	}
-	e.notifier.Enqueue(model.RepoChangedEvent{
+	err = os.RemoveAll(filepath.Join(w.cfg.WorkspaceDir, name))
+	if err != nil {
+		repoState, prev := w.transition(name, model.StateError, "", fmt.Errorf("remove workspace dir: %w", err))
+		w.notify(name, repoState, prev)
+		return
+	}
+	repoState, prev := w.transition(name, model.StateInit, "", nil)
+	w.notify(name, repoState, prev)
+}
+
+// transition updates repo state atomically. ref is only applied for StateReady transitions.
+func (w *Worker) transition(name string, kind model.RepoStateKind, ref string, err error) (model.RepoState, model.RepoStateKind) {
+	repoState, getErr := w.state.Get(name)
+	if getErr != nil {
+		w.log.Error("transition: repo missing from state store", "repo", name)
+		return model.RepoState{Name: name}, ""
+	}
+	prev := repoState.State
+	repoState.State = kind
+	switch kind {
+	case model.StateInit:
+		repoState.Ref = ""
+		repoState.Error = ""
+		repoState.LastUpdatedAt = nil
+	case model.StateSyncing:
+		repoState.Error = ""
+	case model.StateReady:
+		now := time.Now()
+		repoState.Error = ""
+		repoState.LastUpdatedAt = &now
+		if ref != "" {
+			repoState.Ref = ref
+		}
+	case model.StateError:
+		if err != nil {
+			repoState.Error = err.Error()
+		}
+	}
+	w.state.Set(name, repoState)
+	return repoState, prev
+}
+
+func (w *Worker) notify(name string, state model.RepoState, prev model.RepoStateKind) {
+	if w.notifyCh == nil {
+		return
+	}
+	event := model.RepoChangedEvent{
 		EventKind:     model.EventKindRepoChanged,
 		Name:          name,
 		State:         state.State,
@@ -224,14 +280,12 @@ func (e *Worker) notify(name string, state model.RepoState, prev model.RepoState
 		Ref:           state.Ref,
 		LastUpdatedAt: state.LastUpdatedAt,
 		Error:         state.Error,
-	})
-}
-
-func (e *Worker) repoConfig(name string) (model.RepoConfig, bool) {
-	for _, r := range e.cfg.Repos {
-		if r.Name == name {
-			return r, true
-		}
 	}
-	return model.RepoConfig{}, false
+	t := time.NewTimer(w.enqueueTimeout)
+	defer t.Stop()
+	select {
+	case w.notifyCh <- event:
+	case <-t.C:
+		w.log.Warn("notify: notification queue full, dropping event", "repo", name, "state", state.State)
+	}
 }

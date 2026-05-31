@@ -1,12 +1,17 @@
 package storage
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
 )
+
+var ErrRepoNotFound = errors.New("repo not found")
 
 type StateStore struct {
 	mu    sync.RWMutex
@@ -26,11 +31,14 @@ func (s *StateStore) Init(repos []model.RepoConfig, workspaceDir string) {
 	}
 }
 
-func (s *StateStore) Get(name string) (model.RepoState, bool) {
+func (s *StateStore) Get(name string) (model.RepoState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rs, ok := s.repos[name]
-	return rs, ok
+	if !ok {
+		return model.RepoState{}, ErrRepoNotFound
+	}
+	return rs, nil
 }
 
 func (s *StateStore) Set(name string, rs model.RepoState) {
@@ -39,7 +47,6 @@ func (s *StateStore) Set(name string, rs model.RepoState) {
 	s.repos[name] = rs
 }
 
-// List returns repos sorted alphabetically by name, capped at limit entries.
 func (s *StateStore) List(limit int) []model.RepoState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -48,18 +55,35 @@ func (s *StateStore) List(limit int) []model.RepoState {
 		out = append(out, v)
 	}
 	slices.SortFunc(out, func(a, b model.RepoState) int {
-		if a.Name < b.Name {
-			return -1
-		}
-		if a.Name > b.Name {
-			return 1
-		}
-		return 0
+		return strings.Compare(a.Name, b.Name)
 	})
 	if limit < len(out) {
 		out = out[:limit]
 	}
 	return out
+}
+func (s *StateStore) LockAll() ([]model.RepoState, map[string]model.RepoStateKind, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rs := range s.repos {
+		if rs.State == model.StateResetting {
+			return nil, nil, fmt.Errorf("reset already in progress")
+		}
+	}
+	prev := make(map[string]model.RepoStateKind, len(s.repos))
+	out := make([]model.RepoState, 0, len(s.repos))
+	for name, rs := range s.repos {
+		prev[name] = rs.State
+		rs.State = model.StateResetting
+		rs.Error = ""
+		rs.LastUpdatedAt = nil
+		s.repos[name] = rs
+		out = append(out, rs)
+	}
+	slices.SortFunc(out, func(a, b model.RepoState) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return out, prev, nil
 }
 
 func (s *StateStore) SetAll(state model.RepoStateKind) {

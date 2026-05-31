@@ -26,14 +26,16 @@ Mount the config file as a Kubernetes ConfigMap at `/etc/gitops/config.json`, or
   "workspaceDir": "/config/.gitops/repos",
   "repos": [
     {
-      "name":         "ha-config",
-      "url":          "git@github.com:org/ha-config.git",
-      "verifyCommit": true
+      "name":             "ha-config",
+      "url":              "git@github.com:org/ha-config.git",
+      "verifyCommit":     true,
+      "commandQueueSize": 16
     }
   ],
   "notification": {
     "type":          "ha-webhook",
     "url":           "http://app.example.com/api/webhook/<id>",
+    "queueSize":     64,
     "maxBatchSize":  16,
     "batchInterval": "3s"
   }
@@ -48,10 +50,22 @@ Mount the config file as a Kubernetes ConfigMap at `/etc/gitops/config.json`, or
 | `workDir`      | no       | `/tmp/gitops` | Ephemeral scratch space; wiped on every startup          |
 | `notification` | no       | —             | Omit to disable HA webhook notifications                 |
 
-When `notification` is present, two optional fields control batching:
+Each entry in `repos` supports these fields:
+
+| Field                    | Required | Default | Description                                                   |
+|--------------------------|----------|---------|---------------------------------------------------------------|
+| `name`                   | yes      | —       | Repo identifier; must match `^[a-z][a-z0-9-]*$`, max 64 chars |
+| `url`                    | yes      | —       | Git remote URL (SSH or HTTPS)                                 |
+| `verifyCommit`           | no       | `false` | Run `git verify-commit HEAD` after each pull                  |
+| `commandQueueSize`       | no       | `16`    | Depth of the per-repo operation queue                         |
+
+When `notification` is present, these fields are available:
 
 | Field                        | Required | Default | Description                                                      |
 |------------------------------|----------|---------|------------------------------------------------------------------|
+| `notification.type`          | yes      | —       | Must be `"ha-webhook"`                                           |
+| `notification.url`           | yes      | —       | URL to POST event batches to                                     |
+| `notification.queueSize`     | no       | `64`    | In-memory event buffer before delivery                           |
 | `notification.maxBatchSize`  | no       | `16`    | Flush immediately when this many events are pending              |
 | `notification.batchInterval` | no       | `"3s"`  | Send accumulated events on this interval; accepts Go duration strings (`"1s"`, `"500ms"`) |
 
@@ -82,7 +96,7 @@ The sidecar does not manage SSH keys or known hosts. An init container must writ
     <repo-name>          ← per-repo; required only when verifyCommit: true
 ```
 
-When `runtimeDir` is set, the sidecar validates that all required files exist before starting. If any are missing, the sidecar exits immediately. When `runtimeDir` is set and valid, the sidecar sets these environment variables so all git subprocesses inherit them:
+When `runtimeDir` is set, the sidecar validates that required files exist before starting. If any are missing, the sidecar exits immediately. `gitconfig` is always required. `ssh_config` and `known_hosts` are only required when at least one repo URL uses the SSH protocol (`git@` or `ssh://`). When `runtimeDir` is set and valid, the sidecar sets these environment variables so all git subprocesses inherit them:
 
 ```
 GIT_CONFIG_GLOBAL = <runtimeDir>/gitconfig
@@ -117,10 +131,10 @@ Add the following to `gitconfig` to point git at the correct allowed-signers fil
 
 ### Endpoints
 
-`GET /health` is the liveness probe. Always returns:
+`GET /health` is the liveness probe. Returns:
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "version": "v1.2.3", "commit": "abc1234", "date": "2024-01-15" }
 ```
 
 `GET /repos` returns a list of configured repos. Accepts an optional `limit` query parameter (default `10`, max `100`). Results are sorted alphabetically by name.
@@ -139,6 +153,8 @@ Add the following to `gitconfig` to point git at the correct allowed-signers fil
 }
 ```
 
+The `error` field appears on a repo entry only when `state` is `error`.
+
 `GET /repos/{name}` returns the state for a single repo. It returns `404` if the name is not configured.
 
 ```json
@@ -152,8 +168,6 @@ Add the following to `gitconfig` to point git at the correct allowed-signers fil
   }
 }
 ```
-
-The `error` field appears only when `state` is `error`.
 
 `POST /repos/{name}/operation` enqueues an operation for one repo. The request body is a JSON object with a `kind` field. It returns `202` with the repo's current state after the operation is scheduled:
 
@@ -184,7 +198,7 @@ The only supported operation is `pull`, which requires a `ref` field:
 On failure it returns an error status with:
 
 ```json
-{ "error": { "message": "..." } }
+{ "error": "..." }
 ```
 
 ### Repo states
@@ -196,17 +210,13 @@ On failure it returns an error status with:
 | `ready`    | Worktree is current; `last_updated_at` is set                     |
 | `error`    | Last operation failed; `error` field contains the failure message |
 
-The `overall` field in `GET /repos` derives from repo states:
-
-- `syncing` — any repo is in `init` or `syncing`
-- `error` — any repo is in `error` and none are active
-- `ready` — all repos are `ready`
-
 ### Error responses
+
+`400 Bad Request` on `POST /repos/{name}/operation` means the request body is invalid. Check that `kind` is `"pull"` and that `ref` is non-empty.
 
 `404 Not Found` means the repo name in the request path is not in the config. Check the name against your config file.
 
-`409 Conflict` on `POST /repos/{name}/operation` means the bare clone has not completed yet. Wait for the repo to leave `init` state and retry.
+`409 Conflict` on `POST /repos/{name}/operation` means the repo is not ready to accept operations. This happens when the bare clone is still in progress (`init` state) or the bare directory does not exist. Wait for the repo to leave `init` state and retry.
 
 ---
 

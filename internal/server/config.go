@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/junpeng-jp/gitops-sidecar/internal/model"
@@ -27,11 +29,13 @@ var (
 )
 
 const (
-	defaultWorkDir       = "/tmp/gitops"
-	defaultConfigFile    = "/etc/gitops/config.json"
-	defaultPort          = "9001"
-	defaultMaxBatchSize  = 16
-	defaultBatchInterval = 3 * time.Second
+	defaultWorkDir              = "/tmp/gitops"
+	defaultConfigFile           = "/etc/gitops/config.json"
+	defaultPort                 = "9001"
+	defaultCommandQueueSize     = 16
+	defaultNotificationQueueSize = 64
+	defaultMaxBatchSize         = 16
+	defaultBatchInterval        = 3 * time.Second
 )
 
 var repoNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
@@ -73,9 +77,12 @@ func LoadConfig() (*Config, error) {
 	if len(cfg.Repos) == 0 {
 		return nil, fmt.Errorf("config: %w", errNoRepos)
 	}
-	for _, r := range cfg.Repos {
+	for i, r := range cfg.Repos {
 		if err := validateRepoConfig(r); err != nil {
 			return nil, err
+		}
+		if cfg.Repos[i].CommandQueueSize == 0 {
+			cfg.Repos[i].CommandQueueSize = defaultCommandQueueSize
 		}
 	}
 	if cfg.Notification != nil {
@@ -84,6 +91,9 @@ func LoadConfig() (*Config, error) {
 		}
 		if cfg.Notification.URL == "" {
 			return nil, fmt.Errorf("config: %w", errMissingNotificationURL)
+		}
+		if cfg.Notification.QueueSize == 0 {
+			cfg.Notification.QueueSize = defaultNotificationQueueSize
 		}
 		if cfg.Notification.MaxBatchSize < 0 {
 			return nil, fmt.Errorf("config: %w", errInvalidMaxBatchSize)
@@ -113,23 +123,45 @@ func LoadConfig() (*Config, error) {
 	return cfg, nil
 }
 
+func isSSHURL(url string) bool {
+	return strings.HasPrefix(url, "git@") || strings.HasPrefix(url, "ssh://")
+}
+
 func validateSSHRuntime(runtimeDir string, repos []model.RepoConfig) error {
-	if _, err := os.Stat(runtimeDir); os.IsNotExist(err) {
+	if _, err := os.Stat(runtimeDir); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%w: %s", errRuntimeDirMissing, runtimeDir)
+	} else if err != nil {
+		return fmt.Errorf("stat runtimeDir %s: %w", runtimeDir, err)
 	}
 
-	for _, name := range []string{"gitconfig", "ssh_config", "known_hosts"} {
-		p := filepath.Join(runtimeDir, name)
-		if _, err := os.Stat(p); os.IsNotExist(err) {
+	// gitconfig is always required when a runtimeDir is configured.
+	if p := filepath.Join(runtimeDir, "gitconfig"); true {
+		if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w: %s", errRuntimeFileMissing, p)
+		} else if err != nil {
+			return fmt.Errorf("stat %s: %w", p, err)
+		}
+	}
+
+	// ssh_config and known_hosts are only needed for SSH-protocol repos.
+	if slices.ContainsFunc(repos, func(r model.RepoConfig) bool { return isSSHURL(r.URL) }) {
+		for _, name := range []string{"ssh_config", "known_hosts"} {
+			p := filepath.Join(runtimeDir, name)
+			if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("%w: %s", errRuntimeFileMissing, p)
+			} else if err != nil {
+				return fmt.Errorf("stat %s: %w", p, err)
+			}
 		}
 	}
 
 	for _, repo := range repos {
 		if repo.VerifyCommit {
 			p := filepath.Join(runtimeDir, "allowed-signers", repo.Name)
-			if _, err := os.Stat(p); os.IsNotExist(err) {
+			if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("%w: %s", errMissingAllowedSigners, p)
+			} else if err != nil {
+				return fmt.Errorf("stat allowed-signers %s: %w", p, err)
 			}
 		}
 	}
